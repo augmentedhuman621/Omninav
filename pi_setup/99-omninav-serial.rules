@@ -1,0 +1,160 @@
+# =============================================================================
+# OmniNav · USB 串口设备固定命名（udev 规则）
+# -----------------------------------------------------------------------------
+# 装到哪里 ： /etc/udev/rules.d/99-omninav-serial.rules
+# 冻结依据 ： 11_接口契约.md §2 —— 代码里只许出现
+#              /dev/ttySTM32 、 /dev/ttyLIDAR 、 /dev/ttyVISION
+# 生成方式 ： 本文件是**模板**。跑一次 pi_setup/identify_ports.sh 拿到实测的
+#            物理路径之后，你只需要交换/填写下面标【待确认】的那三处。
+# =============================================================================
+#
+# 为什么不能用更省事的写法（三条都想过，都不行）
+# -----------------------------------------------------------------------------
+#   1) ATTRS{serial}=="xxx"
+#      → 雷达转接板与视觉模块通信板**都是 CH340（1a86:7522），都没有唯一序列号**，
+#        这个属性是空的。同型号两颗芯片，udev 无从区分。
+#   2) /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+#      → 同上。实测该目录下**只有一条**记录，两颗里只能命名一颗。
+#   3) KERNEL=="ttyUSB0"
+#      → 插拔顺序一变（先插雷达还是先插视觉模块）两个名字就互换。
+#        症状很隐蔽：桥突然收到一堆雷达的二进制乱码。契约 §2 明令禁止。
+#
+# ⇒ 唯一可靠的办法：按 **USB 物理路径** 绑定。
+#   物理路径只取决于"插在哪个口"，与型号、序列号、插入先后顺序都无关。
+#
+# 为什么用 ENV{ID_PATH} 而不是 KERNELS=="1-2:1.0"
+# -----------------------------------------------------------------------------
+#   ID_PATH 是一个**可以直接查出来、直接抄进规则里**的字符串，不需要任何推导。
+#   KERNELS=="1-2:1.0" 要求你先想清楚"xhci-hcd.0 对应 usb 总线几号"，
+#   这一步既容易推错，换个 USB 口或换块板子又会失效。
+#
+#   ID_PATH 由 /usr/lib/udev/rules.d/60-serial.rules 里的 path_id 内置命令写入；
+#   本文件编号 99 排在 60 之后，所以执行到这里 ID_PATH 一定已经存在。
+#
+# ★★★ 陷阱一（最容易踩、且完全静默）：ID_PATH ≠ by-path 里的链接名
+# -----------------------------------------------------------------------------
+#   /dev/serial/by-path/ 里的名字，是 udev 用
+#       $ID_PATH + "-port" + $ID_USB_INTERFACE_NUM
+#   拼出来的！也就是说链接名**多一个 `-port0` 尾巴**，而 ID_PATH 本身没有：
+#
+#       链接名  platform-xhci-hcd.0-usb-0:2:1.0-port0
+#       ID_PATH platform-xhci-hcd.0-usb-0:2:1.0          ← 规则里要写这个
+#
+#   ★ 真机实测（2026-10，树莓派 5）：
+#       /dev/ttyUSB0 → ID_PATH=platform-xhci-hcd.0-usb-0:2:1.0
+#       /dev/ttyUSB1 → ID_PATH=platform-xhci-hcd.1-usb-0:1:1.0
+#
+#   ⇒ 所以**绝不能把 by-path 的链接名直接抄进 ENV{ID_PATH}** ——
+#     多一个 `-port0` 就永远匹配不上，而且 udev 不会给任何报错，
+#     症状只有"规则装了、reload 了，软链接就是不出来"。
+#   ⇒ 唯一可靠的取法（装之前先跑这条核对）：
+#       udevadm info -q property -n /dev/ttyUSB0 | grep '^ID_PATH='
+#     把 `ID_PATH=` 后面那一整串原样抄进引号里。
+#
+# ★★ 陷阱二：/dev/serial/by-path/ 里每个物理口有【两条】符号链接
+# -----------------------------------------------------------------------------
+# 新版 udev 会为**同一个物理口**同时建两条名字，它们指向同一个 /dev/ttyUSBn：
+#
+#   platform-xhci-hcd.0-usb-0:2:1.0-port0      ← 来自 ID_PATH（规则里用这条的"茎"）
+#   platform-xhci-hcd.0-usbv2-0:2:1.0-port0    ← 来自 ID_PATH_WITH_USB_REVISION，多出来的
+#   platform-xhci-hcd.1-usb-0:1:1.0-port0      ← 来自 ID_PATH
+#   platform-xhci-hcd.1-usbv2-0:1:1.0-port0    ← 来自 ID_PATH_WITH_USB_REVISION，多出来的
+#
+#   ⇒ 在树莓派上 `ls /dev/serial/by-path/` 看到 4 条、而实际只有 2 个设备，
+#     这是正常的，不是有设备被枚举了两次。
+#
+#   ⇒ **ID_PATH 对应的是不带 usbv2 的那条。** 抄成 usbv2 那条同样是静默失败。
+#     pi_setup/identify_ports.sh 的输出**已经自动过滤掉 usbv2 重复项、并且自动
+#     去掉 `-port0` 尾巴**，用它打印的规则文本这两个坑都不会踩。
+#     你自己手抄时则要同时注意这两件事。
+#
+# 实测的物理路径 ↔ 当时看到的设备名（2026-10，树莓派 5）
+# -----------------------------------------------------------------------------
+#   链接名（by-path）                          →   设备名      它的 ID_PATH
+#   platform-xhci-hcd.0-usb-0:2:1.0-port0      →   ttyUSB0     platform-xhci-hcd.0-usb-0:2:1.0
+#   platform-xhci-hcd.1-usb-0:1:1.0-port0      →   ttyUSB1     platform-xhci-hcd.1-usb-0:1:1.0
+#
+#   ★★ 但"哪个物理口插的是雷达、哪个是视觉模块"**还没有确定** ——
+#      见下面两处【待确认】。跑一次 pi_setup/identify_ports.sh 就能定下来；
+#      定下来之后你要做的改动只有一件事：
+#      **交换下面 ttyLIDAR 与 ttyVISION 两行的 ID_PATH 引号里的字符串**。
+#
+# 安装与生效
+# -----------------------------------------------------------------------------
+#   0) ★ 装之前先核对引号里的值（这一步能拦住 90% 的"装了不生效"）：
+#        udevadm info -q property -n /dev/ttyUSB0 | grep '^ID_PATH='
+#        udevadm info -q property -n /dev/ttyUSB1 | grep '^ID_PATH='
+#      输出的两串必须能分别在下面两条规则里逐字符找到（不带 -port0）。
+#   1) sudo cp 99-omninav-serial.rules /etc/udev/rules.d/
+#      sudo chown root:root /etc/udev/rules.d/99-omninav-serial.rules
+#      sudo chmod 0644      /etc/udev/rules.d/99-omninav-serial.rules
+#   2) sudo udevadm control --reload-rules
+#      sudo udevadm trigger --subsystem-match=tty
+#   3) ls -l /dev/ttyLIDAR /dev/ttyVISION        # ← 必须看到两个软链接
+#   4) 没出来时的第一诊断：
+#        sudo udevadm test --action=add /sys/class/tty/ttyUSB0 2>&1 | grep -i omninav
+#      （会打印本文件是否被读、哪一行匹配/不匹配）
+# =============================================================================
+
+
+# ---- ① 激光雷达 -------------------------------------------------------------
+# 【待确认 ①】这里假设 `platform-xhci-hcd.0-usb-0:2:1.0` 这个物理口插的是雷达。
+#             若 identify_ports.sh 的结论相反 → 把本行与下面 ttyVISION 那行的
+#             ID_PATH 字符串互换（只动引号里的内容，别动别的）。
+#             ★ 注意本行引号里**没有** `-port0` 尾巴，这是对的（见文件开头「陷阱一」）。
+# ★ 2026-10 加 ATTRS{idProduct}=="7522"：雷达/视觉是 CH340K(7522)，STM32 的 USB-TTL 是
+#   经典 CH340(7523)。加上 PID 之后，即使有人把 USB-TTL 插到这个物理口，也不会被误命名成 ttyLIDAR。
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idProduct}=="7522", ENV{ID_PATH}=="platform-xhci-hcd.0-usb-0:2:1.0", SYMLINK+="ttyLIDAR", GROUP="dialout", MODE="0660"
+
+
+# ---- ② ESP32-S3 视觉模块通信板 ---------------------------------------------
+# 【待确认 ②】同上，与 ① 成对交换。
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idProduct}=="7522", ENV{ID_PATH}=="platform-xhci-hcd.1-usb-0:1:1.0", SYMLINK+="ttyVISION", GROUP="dialout", MODE="0660"
+
+
+# ---- ③ STM32 串口桥用的独立 USB-TTL 模块 -------------------------------------
+# ★★ 2026-10-08 已启用。**这一行故意不用 ID_PATH，改用 PID 匹配** —— 理由：
+#
+#   实测这颗 USB-TTL 是 **CH340 经典款 `1a86:7523`**（`iProduct = "USB Serial"`，
+#   `iSerial = 0` 无序列号），而雷达/视觉是 **CH340K `1a86:7522`**。**PID 不同，
+#   所以根本不需要靠物理口区分** —— 而 ID_PATH 匹配的是"插在哪个口"，
+#   模块换个 USB 口插名字就没了，对 STM32 这条链路是没必要的约束。
+#
+#   当时的实测（`lsusb -v -d 1a86:7523` / `udevadm info -q property -n /dev/ttyUSB0`）：
+#       idVendor   0x1a86      idProduct  0x7523
+#       ID_MODEL   USB_Serial  ID_SERIAL  1a86_USB_Serial（无唯一序列号）
+#       ID_PATH    platform-xhci-hcd.1-usb-0:2:1.0   ← 仅作备选，见下方注释行
+#
+#   ★ 为什么 ① ② 两条仍然必须带 ID_PATH：雷达和视觉**同型号同 PID**，
+#     udev 无从区分，只能按物理口绑定（见文件开头 11-23 行的说明）。
+#
+#   若将来又买了一颗 7523 的模块接到同一台树莓派上，这条 PID 规则会产生歧义，
+#   那时再换成下面那行"备选：按物理口"的写法即可。
+SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="ttySTM32", GROUP="dialout", MODE="0660"
+#
+# 备选：按物理口（2026-10-08 实测值，注意引号里**没有** -port0 尾巴）
+# SUBSYSTEM=="tty", KERNEL=="ttyUSB*", ENV{ID_PATH}=="platform-xhci-hcd.1-usb-0:2:1.0", SYMLINK+="ttySTM32", GROUP="dialout", MODE="0660"
+
+
+# =============================================================================
+# 备选写法（只在下面这种罕见情况才需要）
+# -----------------------------------------------------------------------------
+# 如果 `udevadm info -q property -n /dev/ttyUSB0 | grep '^ID_PATH='` **什么都不打印**，
+# 说明你这套系统的 60-serial.rules 没有设置 ID_PATH（正常 Ubuntu 24.04 不会这样）。
+# 那时改用物理内核路径，把上面两条换成下面两条：
+#
+#   SUBSYSTEM=="tty", KERNEL=="ttyUSB*", KERNELS=="1-2:1.0", SYMLINK+="ttyLIDAR",  GROUP="dialout", MODE="0660"
+#   SUBSYSTEM=="tty", KERNEL=="ttyUSB*", KERNELS=="2-1:1.0", SYMLINK+="ttyVISION", GROUP="dialout", MODE="0660"
+#
+# 这两个字符串同样可以从实测反推，验证命令：
+#   udevadm info -a -n /dev/ttyUSB0 | grep -m1 'KERNELS='
+#   然后**实际看到的那个**为准，不要照抄上面的示例数字。
+# =============================================================================
+#
+# 关于 MODE="0660" + GROUP="dialout"
+# -----------------------------------------------------------------------------
+# 用它要求用户 `yjc` 在 dialout 组里（`sudo usermod -aG dialout yjc`，
+# ★ 之后**必须重新登录**才生效，见 pi_setup/README.md 第 2 节）。
+# 如果你只想"现在马上先跑通"，把两处 MODE="0660" 临时改成 MODE="0666"
+# （任何用户可读写）。**这只是排障用的临时手段，不要把 0666 留在最终配置里。**
+# =============================================================================

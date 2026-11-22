@@ -1,0 +1,36 @@
+# 机器人项目版本管理排除项（Lead 维护）
+# 实验/临时/历史工作区（与 M0–M8 交付无关）
+_tmp/
+_altium_work/
+_it01_work/
+_refs/
+硬件模型/
+.dsh/
+_ed_work/
+
+# 构建产物（可由源码重建）
+build/
+__pycache__/
+*.pyc
+*.o
+*.obj
+*.so
+*.a
+*.axf
+*.hex
+*.map
+*.dep
+*.lnp
+*.htm
+stm32_fw/MDK-ARM/Objects/
+
+# 说明：build_*.log、flash_*.log、_probe/*.log 是验收证据，保留入库
+
+# 仓库只保留代码：文档/报告/笔记/清单/日志不入库（2026-11-22 用户要求）
+*.md
+/README.md
+*.log
+*.lst
+*.txt
+reports/
+ED_Obsidian_Vault/
