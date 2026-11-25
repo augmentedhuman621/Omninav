@@ -37,3 +37,7 @@ ED_Obsidian_Vault/
 
 # 例外：各代码模块目录下的中文模块说明（文件名固定，仅此放行）
 !/*/_模块说明.md
+
+# Exception: CMakeLists.txt and mesh placeholders must stay tracked (the *.txt rule is for docs/logs)
+!CMakeLists.txt
+!**/meshes/README.txt
