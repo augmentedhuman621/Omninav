@@ -5,6 +5,11 @@ Usage (Humble environment):
   ros2 launch omninav_sim gazebo.launch.py gui:=false      # headless (remote / low-spec)
   ros2 launch omninav_sim gazebo.launch.py world:=/path/to/xxx.world
 
+RViz2 visualisation (works headless; useful when the VM has no 3D acceleration):
+  ros2 launch omninav_sim gazebo.launch.py gui:=false gazebo_odom:=false rviz:=true
+  The bundled config shows the URDF model, TF tree, /scan and the /odom trail; start
+  stm32_bridge afterwards so that odom -> base_link exists (Fixed Frame = odom).
+
 After launch:
   /cmd_vel  -> the planar_move plugin moves the robot body directly (omnidirectional)
   /odom     -> published by the plugin (the odom frame -> base_link TF is published by the plugin)
@@ -78,6 +83,16 @@ def generate_launch_description():
         ],
     )
 
+    rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        output='screen',
+        arguments=['-d', PathJoinSubstitution([pkg_share, 'rviz', 'omninav_robot.rviz'])],
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(LaunchConfiguration('rviz')),
+    )
+
     return LaunchDescription([
         DeclareLaunchArgument(
             'world',
@@ -96,8 +111,13 @@ def generate_launch_description():
             'gazebo_odom', default_value='true',
             description='Let planar_move publish /odom + odom->base_link TF; set false when '
                         'stm32_bridge owns them (bridge simulation mode)'),
+        DeclareLaunchArgument(
+            'rviz', default_value='false',
+            description='Start rviz2 with the bundled omninav_robot.rviz config (model, TF, '
+                        '/scan, /odom trail)'),
         gzserver,
         gzclient,
         robot_state_publisher,
         spawn_entity,
+        rviz,
     ])
