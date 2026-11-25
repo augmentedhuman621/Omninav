@@ -22,6 +22,8 @@ pyserial_vendor/      pyserial 3.5 (BSD-3-Clause, pure Python), used only if the
                       has no pyserial and its apt mirror refuses the package
 setup_bridge_env.sh   copies the items above into ~/omninav_ws and colcon-builds the package
 run_bridge_sim.sh     starts fake_stm32.py on a pty, then starts stm32_bridge on that pty
+check_odom.sh         graph probe (environment + nodes + topics + /odom count)
+check_odom.py         the rclpy part of check_odom.sh (also usable on its own)
 README.txt            this file
 
 Steps
@@ -82,5 +84,23 @@ Troubleshooting
 * "No module named 'serial'" -> sudo apt-get install -y python3-serial
 * /odom published twice / TF warnings about multiple publishers ->
     Gazebo was started without gazebo_odom:=false. Restart it with that flag.
+* "ros2 topic hz /odom" prints "topic [/odom] does not appear to be published
+  yet" -> run the graph probe instead of the ros2 CLI:
+      bash /media/sf_vmshare/omninav_bridge_sim/check_odom.sh
+  It does not depend on the ros2 CLI daemon and prints ROS_DOMAIN_ID /
+  RMW_IMPLEMENTATION, the discovered nodes, and the /odom message count.
+  Most likely causes, in order:
+    a) the terminal that runs run_bridge_sim.sh was closed or Ctrl+C'ed (it is
+       the only /odom publisher, and closing it stops both processes);
+    b) this terminal's ROS_DOMAIN_ID or RMW_IMPLEMENTATION differs from the
+       bridge terminal's (they are printed by both run_bridge_sim.sh and
+       check_odom.sh -- compare the two lines and export the same values);
+    c) Gazebo was not restarted with gazebo_odom:=false (the old plug-in then
+       competes for /odom).
+* Bridge floods "measured E-frame interval ... far exceeds the nominal period
+  20.0 ms" -> diagnostic only. The bridge integrates odometry with the
+  contract's nominal 20 ms, never with the measured interval, so the pose stays
+  correct; the warnings mean the VM occasionally starves the fake STM32 thread
+  (Gazebo software rendering). Ignore, or reduce Gazebo load.
 * Bridge reports serial timeouts -> make sure no other program opened the pty;
     restart run_bridge_sim.sh (the pty path changes every run).

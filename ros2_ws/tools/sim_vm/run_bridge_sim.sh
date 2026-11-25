@@ -32,6 +32,8 @@ source /opt/ros/humble/setup.bash
 source "$WS/install/setup.bash"
 set -u
 
+echo "== ROS env: ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-<unset, default 0>} RMW_IMPLEMENTATION=${RMW_IMPLEMENTATION:-<unset, default rmw_fastrtps_cpp>} =="
+
 # If setup_bridge_env.sh had to vendor pyserial (apt mirror blocked), make it
 # importable for the bridge node started below.
 PY_VENDOR="$WS/lib/pyserial_vendor"
