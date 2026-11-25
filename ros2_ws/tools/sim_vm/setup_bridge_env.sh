@@ -64,14 +64,9 @@ else
   fi
 fi
 
-echo "-- colcon build stm32_bridge"
-# shellcheck disable=SC1091
-source /opt/ros/humble/setup.bash
-cd "$WS"
-
 # If the kit sits next to a fresh copy of omninav_sim (the usual layout on the
-# shared folder), refresh that package too: the bridge mode needs the
-# "gazebo_odom" launch argument added in that package.
+# shared folder), refresh that package too: bridge mode needs the "gazebo_odom"
+# launch argument that only the refreshed copy has.
 SIM_SRC="$(cd "$KIT_DIR/.." && pwd)/omninav_sim"
 BUILD_PKGS="stm32_bridge"
 if [ -d "$SIM_SRC" ] && [ -f "$SIM_SRC/package.xml" ]; then
@@ -81,6 +76,14 @@ if [ -d "$SIM_SRC" ] && [ -f "$SIM_SRC/package.xml" ]; then
   BUILD_PKGS="omninav_sim stm32_bridge"
 fi
 
+echo "-- colcon build: $BUILD_PKGS"
+cd "$WS"
+# ROS 2 Humble's setup.bash reads AMENT_TRACE_SETUP_FILES without a default and
+# therefore aborts when 'set -u' is active: relax nounset just around sourcing.
+set +u
+# shellcheck disable=SC1091
+source /opt/ros/humble/setup.bash
+set -u
 colcon build --packages-select $BUILD_PKGS --symlink-install
 
 echo

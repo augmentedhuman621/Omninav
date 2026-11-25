@@ -23,10 +23,14 @@ LOG="${TMPDIR:-/tmp}/omninav_fake_stm32.log"
 # The bridge and the fake target both load the C core library from here.
 export OMNINAV_CORE_SO="$CORE_SO"
 
+# ROS 2 Humble's setup.bash reads AMENT_TRACE_SETUP_FILES without a default and
+# aborts under 'set -u', so relax nounset just around sourcing.
+set +u
 # shellcheck disable=SC1091
 source /opt/ros/humble/setup.bash
 # shellcheck disable=SC1091
 source "$WS/install/setup.bash"
+set -u
 
 # If setup_bridge_env.sh had to vendor pyserial (apt mirror blocked), make it
 # importable for the bridge node started below.
