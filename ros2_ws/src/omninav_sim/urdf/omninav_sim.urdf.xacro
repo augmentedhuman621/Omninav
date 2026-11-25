@@ -12,32 +12,44 @@
   * fixed joints only: the wheels do not spin in the URDF. Odometry comes either from the Gazebo
     planar_move plugin or from stm32_bridge (single owner, selected with the gazebo_odom argument).
 
+  Layout follows the CAD battery-box assembly figures (drive E:, DI31013_Battery_Box_Final_Complete_V2_M3)
+  and their dimensioned side view, which fixes the vertical stack:
+      wheel radius R              = 40.376 mm      wheel axle centre
+      battery tray bottom         = axle + 0.75 R  = 30.282 mm above the axle
+      tray height                 = 36.15 mm       tray top = 66.43 mm above the axle
+      main chassis plate          = 3 mm on top of the tray, so its top face sits 69.43 mm above the axle
+      theoretical ground          = axle - R       = 40.376 mm below the axle
+    i.e. the chassis plate is the TOP deck, 109.8 mm above the ground, the battery tray hangs below it
+    between the wheels, the side panels hang down from the deck edges, and the electronics, the battery
+    package, the lidar and the camera gimbal sit on the deck. base_link origin = centre of the deck's
+    top face, so spawn_z must be 0.112 m (2 mm drop onto the wheels).
+
   CAD parts used as visual meshes (measured bounding boxes, mm)
-  ============================================================    base_plate.stl        230.00 x   3.00 x 304.88  main chassis plate (230 wide / 304.88 long)
-    wheel_left.stl         41.00 x  80.29 x  80.55  left mecanum wheel, 12,648 tris (was 197,182)
-    wheel_right.stl        41.00 x  80.28 x  80.55  right mecanum wheel, 12,395 tris (was 190,544)
+  ============================================================
+    base_plate.stl        230.00 x   3.00 x 304.88  main chassis plate (230 wide / 304.88 long)
+    wheel_left.stl         41.00 x  80.32 x  80.62  left mecanum wheel, 24,915 tris (was 197,182)
+    wheel_right.stl        41.00 x  80.32 x  80.62  right mecanum wheel, 24,138 tris (was 190,544)
     motor.stl              37.00 x  36.91 x  74.50  encoder motor (body only)
     coupling.stl           12.00 x  12.00 x  26.00  wheel coupling
-    standoff.stl            5.99 x  45.00 x   6.00  plate standoff (45 mm between the two plates)
-    side_panel_left.stl    51.25 x  40.00 x 182.00  lower side skirt, left
-    side_panel_right.stl   51.25 x  40.00 x 182.00  lower side skirt, right
-    battery_box.stl        68.60 x 120.35 x  36.15  dual-slot battery box (steel wrap)
-    gimbal_yoke.stl        45.47 x  39.00 x  46.58  camera yaw carriage
+    side_panel_left.stl    51.25 x  40.00 x 182.00  side panel hanging from the deck edge, left
+    side_panel_right.stl   51.25 x  40.00 x 182.00  side panel hanging from the deck edge, right
+    battery_box.stl        68.60 x 120.35 x  36.15  dual-slot steel battery tray under the deck
+    gimbal_yoke.stl        45.47 x  39.00 x  46.58  camera yaw carriage (front, overhanging the edge)
     camera_body.stl        31.62 x  35.54 x  27.18  camera PCB (ESP32 based)
     camera_lens.stl        10.36 x   9.98 x  10.30  camera lens housing
 
-  Not available as mesh, therefore approximated
-  ============================================================  * top plate (158 x 260 x 3 mm): the SLDPRT exports as a zero-thickness body, so it stays a box.
-  * motor L-brackets, screws, washers: skipped (sub-millimetre detail, invisible at robot scale).
-  * The CAD assembly has no valid in-place transform for the chassis parts (the top-level assembly
-    stores them in an exploded layout), so the placements below are reconstructed from the CAD
-    dimensions plus the intended design: wheels outboard of the 230 mm wide plate, motors inboard of
-    the wheels, battery box between the plates, electronics and the camera gimbal on top.
+  Not available as mesh, therefore approximated with primitives
+  ============================================================
+  * upper plate (158 x 260 x 3 mm): its SLDPRT exports as a zero-thickness surface body, so it is
+    omitted; the final assembly uses the 304.88 x 230 plate as the top deck anyway.
+  * Raspberry Pi 5, STM32 board, USB camera, vertical battery holder, camera mast, lidar body:
+    boxes/cylinders sized from the CAD figures.
+  * motor L-brackets, screws, washers, motor-driver boards hidden behind the side panels: skipped.
   * Mass/inertia remain engineering estimates: the CAD model has no material assigned, so the
     1.5 kg assembly weight is meaningless (default density).
 
   Dimension sources: 2026-11-25/26 SolidWorks MCP measurements, the vendor bottom-plate drawing
-  (PDF sheet under the CAD folder on drive E:) and STL bounding boxes.
+  (PDF sheet under the CAD folder on drive E:), the DI31013 assembly figures and STL bounding boxes.
 
   Lidar: libgazebo_ros_ray_sensor.so, 360 rays at 10 Hz, range 0.12-8 m, output /scan.
 -->
@@ -49,27 +61,23 @@
   <xacro:arg name="publish_odom_tf" default="true"/>
 
   <!-- ==================== Dimensions (CAD measured unless marked) ==================== -->
-  <xacro:property name="wheel_r"        value="0.04023"/>   <!-- STL: 80.55 mm diameter -->
+  <xacro:property name="wheel_r"        value="0.040376"/>  <!-- 80.75 mm diameter, CAD R = 40.376 -->
   <xacro:property name="wheel_w"        value="0.0410"/>
   <xacro:property name="wheelbase"      value="0.210"/>     <!-- front/rear axle distance (design intent, TODO confirm on the real robot) -->
   <xacro:property name="track"          value="0.275"/>     <!-- left/right wheel spacing: wheels sit outboard of the 230 mm plate -->
   <xacro:property name="plate_l"        value="0.30488"/>
   <xacro:property name="plate_w"        value="0.230"/>
   <xacro:property name="plate_t"        value="0.003"/>
-  <xacro:property name="plate_z"        value="-0.0135"/>   <!-- plate centre, 60 mm above ground (61.5 mm - base_z) -->
-  <xacro:property name="plate_top"      value="0.063"/>     <!-- world height of the plate top face -->
-  <xacro:property name="top_plate_l"    value="0.260"/>
-  <xacro:property name="top_plate_w"    value="0.158"/>
-  <xacro:property name="top_plate_t"    value="0.003"/>
-  <xacro:property name="top_plate_z"    value="0.0345"/>    <!-- world height 109.5 mm -->
-  <xacro:property name="base_h"         value="0.090"/>     <!-- overall chassis height, used for the inertia estimate -->
-  <xacro:property name="base_z"         value="0.075"/>     <!-- height of base_link above the ground -->
+  <xacro:property name="plate_z"        value="-0.0015"/>   <!-- deck centre: its top face is z = 0 in base_link -->
+  <xacro:property name="tray_h"         value="0.03615"/>
+  <xacro:property name="tray_z"         value="-0.021075"/> <!-- tray top = deck bottom (-0.003) -->
+  <xacro:property name="axle_z"         value="-0.069432"/> <!-- wheel axle: deck top is 66.432 + wheel_r above it -->
+  <xacro:property name="side_panel_z"   value="-0.028625"/> <!-- panels hang from the deck bottom, 51.25 mm tall -->
+  <xacro:property name="base_h"         value="0.115"/>     <!-- overall chassis height, used for the inertia estimate -->
+  <xacro:property name="deck_h"         value="0.109808"/>  <!-- deck top face above the ground at spawn (documented, used by the launch file) -->
   <!-- masses: engineering estimates (see header) -->
-  <xacro:property name="m_base"         value="2.2"/>
-  <xacro:property name="m_wheel"        value="0.15"/>
-  <xacro:property name="m_batt"         value="0.55"/>
-  <xacro:property name="m_pi"           value="0.10"/>
-  <xacro:property name="m_stm32"        value="0.06"/>
+  <xacro:property name="m_base"         value="2.60"/>
+  <xacro:property name="m_wheel"        value="0.28"/>
   <xacro:property name="m_lidar"        value="0.12"/>
 
   <!-- ==================== Inertia macros ==================== -->
@@ -111,74 +119,107 @@
     </visual>
   </xacro:macro>
 
-  <!-- One 45 mm plate standoff: part Y = 45 length -> world Z, so roll +90 deg -->
-  <xacro:macro name="standoff_at" params="px py">
-    <xacro:vis_mesh mesh="standoff.stl" xyz="${px} ${py} 0.0105" rpy="1.5707963 0 0"
-                    mat="mat_steel" rgba="0.55 0.56 0.58 1.0"/>
+  <xacro:macro name="vis_cyl" params="xyz rpy r l mat rgba">
+    <visual>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+      <geometry><cylinder radius="${r}" length="${l}"/></geometry>
+      <material name="${mat}"><color rgba="${rgba}"/></material>
+    </visual>
   </xacro:macro>
 
-  <!-- One motor + coupling pair: sx = +1 left side, -1 right side.
+  <!-- One motor + coupling pair on one wheel axis: sx = +1 left side, -1 right side.
        The motor body is 74.5 mm long on its own Z axis, the coupling 26 mm; both share the wheel axis.
        wheel inner face at |y| = 0.117, coupling 0.091..0.117 (centre 0.104), motor 0.0165..0.091 (centre 0.0538) -->
   <xacro:macro name="motor_pair" params="cx sx">
-    <xacro:vis_mesh mesh="motor.stl" xyz="${cx} ${sx * 0.0538} -0.03477" rpy="0 -1.5707963 -1.5707963"
-                    mat="mat_motor" rgba="0.26 0.27 0.30 1.0"/>
-    <xacro:vis_mesh mesh="coupling.stl" xyz="${cx} ${sx * 0.104} -0.03477" rpy="-1.5707963 0 0"
+    <xacro:vis_mesh mesh="motor.stl" xyz="${cx} ${sx * 0.0538} ${axle_z}" rpy="0 -1.5707963 -1.5707963"
+                    mat="mat_motor" rgba="0.30 0.31 0.34 1.0"/>
+    <xacro:vis_mesh mesh="coupling.stl" xyz="${cx} ${sx * 0.104} ${axle_z}" rpy="-1.5707963 0 0"
                     mat="mat_coupling" rgba="0.85 0.48 0.16 1.0"/>
+  </xacro:macro>
+
+  <!-- Motor mount under the deck (procedural: the CAD L-bracket's own frame is ambiguous).
+       Three boxes per motor: a foot plate bolted to the deck underside, a web hanging at the motor's
+       inboard end and a saddle strap over the motor body, so the chain deck -> mount -> motor ->
+       coupling -> wheel reads as one connected assembly. sx = +1 left side, -1 right side. -->
+  <xacro:macro name="motor_mount" params="cx sx">
+    <xacro:vis_box xyz="${cx} ${sx * 0.060} -0.0055" rpy="0 0 0" sx="0.050" sy="0.090" sz="0.005"
+                   mat="mat_aluminium" rgba="0.74 0.75 0.77 1.0"/>
+    <xacro:vis_box xyz="${cx} ${sx * 0.014} -0.0285" rpy="0 0 0" sx="0.040" sy="0.006" sz="0.051"
+                   mat="mat_aluminium" rgba="0.74 0.75 0.77 1.0"/>
+    <xacro:vis_box xyz="${cx} ${sx * 0.054} -0.0485" rpy="0 0 0" sx="0.040" sy="0.075" sz="0.006"
+                   mat="mat_aluminium" rgba="0.74 0.75 0.77 1.0"/>
+  </xacro:macro>
+
+  <!-- Vertical battery package at the rear left corner of the deck: holder + cell + connector -->
+  <xacro:macro name="battery_pack" params="px py">
+    <xacro:vis_box xyz="${px} ${py} 0.065" rpy="0 0 0" sx="0.066" sy="0.042" sz="0.130"
+                   mat="mat_battery" rgba="0.13 0.18 0.28 1.0"/>
+    <xacro:vis_box xyz="${px} ${py} 0.140" rpy="0 0 0" sx="0.050" sy="0.042" sz="0.020"
+                   mat="mat_battery_cap" rgba="0.16 0.34 0.62 1.0"/>
+    <xacro:vis_box xyz="${px} ${py} 0.160" rpy="0 0 0" sx="0.018" sy="0.012" sz="0.014"
+                   mat="mat_connector" rgba="0.86 0.66 0.12 1.0"/>
+  </xacro:macro>
+
+  <!-- Camera mast: two vertical rods on the deck carrying the small camera module -->
+  <xacro:macro name="camera_mast" params="px py">
+    <xacro:vis_cyl xyz="${px} ${py - 0.014} 0.060" rpy="0 0 0" r="0.003" l="0.120"
+                   mat="mat_steel" rgba="0.55 0.56 0.58 1.0"/>
+    <xacro:vis_cyl xyz="${px} ${py + 0.014} 0.060" rpy="0 0 0" r="0.003" l="0.120"
+                   mat="mat_steel" rgba="0.55 0.56 0.58 1.0"/>
+    <xacro:vis_box xyz="${px} ${py} 0.140" rpy="0 0 0" sx="0.040" sy="0.035" sz="0.040"
+                   mat="mat_white" rgba="0.88 0.88 0.90 1.0"/>
   </xacro:macro>
 
   <!-- ==================== Chassis base_link ==================== -->
   <link name="base_link">
     <xacro:inertial_box m="${m_base}" x="${plate_l}" y="${plate_w}" z="${base_h}"/>
     <collision>
-      <origin xyz="0 0 0" rpy="0 0 0"/>
-      <geometry><box size="${plate_l} ${plate_w} ${base_h}"/></geometry>
+      <origin xyz="0 0 -0.003" rpy="0 0 0"/>
+      <geometry><box size="${plate_l} ${plate_w} 0.006"/></geometry>
     </collision>
 
-    <!-- main chassis plate: part X = 230 width -> world Y, part Z = 304.88 length -> world X -->
+    <!-- top deck: part X = 230 width -> world Y, part Z = 304.88 length -> world X, part Y = 3 thickness -> world Z -->
     <xacro:vis_mesh mesh="base_plate.stl" xyz="0 0 ${plate_z}" rpy="1.5707963 0 1.5707963"
-                    mat="mat_aluminium" rgba="0.72 0.73 0.75 1.0"/>
+                    mat="mat_aluminium" rgba="0.78 0.79 0.81 1.0"/>
 
-    <!-- top plate: SLDPRT exports as a zero-thickness body, keep a box (158 x 260 x 3 mm) -->
-    <xacro:vis_box xyz="0 0 ${top_plate_z}" rpy="0 0 0"
-                   sx="${top_plate_l}" sy="${top_plate_w}" sz="${top_plate_t}"
-                   mat="mat_aluminium" rgba="0.72 0.73 0.75 1.0"/>
+    <!-- battery tray hanging below the deck between the wheels -->
+    <xacro:vis_mesh mesh="battery_box.stl" xyz="0 0 ${tray_z}" rpy="0 0 -1.5707963"
+                    mat="mat_battery" rgba="0.13 0.18 0.28 1.0"/>
 
-    <!-- four 45 mm standoffs between the plates -->
-    <xacro:standoff_at px=" 0.108" py=" 0.060"/>
-    <xacro:standoff_at px=" 0.108" py="-0.060"/>
-    <xacro:standoff_at px="-0.108" py=" 0.060"/>
-    <xacro:standoff_at px="-0.108" py="-0.060"/>
-
-    <!-- lower side skirts: part X = 51.25 height -> world Z, part Z = 182 length -> world X -->
-    <xacro:vis_mesh mesh="side_panel_left.stl" xyz="0  0.099 0.0136" rpy="0 -1.5707963 0"
-                    mat="mat_aluminium" rgba="0.66 0.67 0.69 1.0"/>
-    <xacro:vis_mesh mesh="side_panel_right.stl" xyz="0 -0.099 0.0136" rpy="0 -1.5707963 0"
-                    mat="mat_aluminium" rgba="0.66 0.67 0.69 1.0"/>
-
-    <!-- battery box (dual slot steel wrap) between the plates, long axis along the chassis -->
-    <xacro:vis_mesh mesh="battery_box.stl" xyz="-0.030 0 0.00608" rpy="0 0 -1.5707963"
-                    mat="mat_battery" rgba="0.16 0.30 0.58 1.0"/>
+    <!-- side panels hanging from the deck's long edges: part X = 51.25 height -> world Z, part Z = 182 length -> world X -->
+    <xacro:vis_mesh mesh="side_panel_left.stl" xyz="0  0.095 ${side_panel_z}" rpy="0 -1.5707963 0"
+                    mat="mat_aluminium" rgba="0.70 0.71 0.73 1.0"/>
+    <xacro:vis_mesh mesh="side_panel_right.stl" xyz="0 -0.095 ${side_panel_z}" rpy="0 -1.5707963 0"
+                    mat="mat_aluminium" rgba="0.70 0.71 0.73 1.0"/>
 
     <!-- drive train: 4 motors inboard of the wheels, 4 couplings between motor and wheel -->
     <xacro:motor_pair cx=" 0.105" sx=" 1"/>
     <xacro:motor_pair cx=" 0.105" sx="-1"/>
     <xacro:motor_pair cx="-0.105" sx=" 1"/>
     <xacro:motor_pair cx="-0.105" sx="-1"/>
+    <xacro:motor_mount cx=" 0.105" sx=" 1"/>
+    <xacro:motor_mount cx=" 0.105" sx="-1"/>
+    <xacro:motor_mount cx="-0.105" sx=" 1"/>
+    <xacro:motor_mount cx="-0.105" sx="-1"/>
 
-    <!-- electronics on the top plate: Raspberry Pi 5 front right, STM32F103 board front left -->
-    <xacro:vis_box xyz="0.070 0.032 0.043" rpy="0 0 0" sx="0.085" sy="0.056" sz="0.020"
-                   mat="mat_pcb" rgba="0.05 0.32 0.14 1.0"/>
-    <xacro:vis_box xyz="-0.055 -0.030 0.0405" rpy="0 0 0" sx="0.100" sy="0.060" sz="0.015"
-                   mat="mat_stm32" rgba="0.06 0.12 0.24 1.0"/>
+    <!-- ============ deck hardware (rear to front: battery, Pi 5, STM32, camera mast, lidar, gimbal) ============ -->
+    <xacro:battery_pack px="-0.115" py=" 0.050"/>
+    <xacro:vis_box xyz="-0.030 0.030 0.010" rpy="0 0 0" sx="0.085" sy="0.056" sz="0.020"
+                   mat="mat_pcb" rgba="0.10 0.50 0.25 1.0"/>
+    <xacro:vis_box xyz="-0.030 -0.055 0.0075" rpy="0 0 0" sx="0.100" sy="0.060" sz="0.015"
+                   mat="mat_stm32" rgba="0.10 0.20 0.60 1.0"/>
+    <xacro:vis_box xyz=" 0.005 0.058 0.0175" rpy="0 0 0" sx="0.032" sy="0.032" sz="0.035"
+                   mat="mat_white" rgba="0.88 0.88 0.90 1.0"/>
+    <xacro:camera_mast px=" 0.030" py=" 0.040"/>
 
-    <!-- camera gimbal on the rear right corner of the top plate (yaw carriage + camera) -->
-    <xacro:vis_mesh mesh="gimbal_yoke.stl" xyz="-0.100 0.045 0.0563" rpy="0 0 0"
-                    mat="mat_motor" rgba="0.33 0.34 0.37 1.0"/>
-    <xacro:vis_mesh mesh="camera_body.stl" xyz="-0.100 0.045 0.0905" rpy="0 0 0"
-                    mat="mat_pcb" rgba="0.05 0.30 0.18 1.0"/>
-    <xacro:vis_mesh mesh="camera_lens.stl" xyz="-0.078 0.045 0.0905" rpy="0 0 0"
-                    mat="mat_camera" rgba="0.10 0.10 0.12 1.0"/>
+    <!-- camera gimbal overhanging the front edge: U-yoke on the deck, vertical camera PCB with the
+         lens barrel facing forward (+x) -->
+    <xacro:vis_mesh mesh="gimbal_yoke.stl" xyz="0.150 -0.055 0.022" rpy="0 0 0"
+                    mat="mat_black" rgba="0.14 0.14 0.16 1.0"/>
+    <xacro:vis_mesh mesh="camera_body.stl" xyz="0.150 -0.055 0.050" rpy="0 1.5707963 0"
+                    mat="mat_pcb" rgba="0.10 0.42 0.22 1.0"/>
+    <xacro:vis_mesh mesh="camera_lens.stl" xyz="0.168 -0.055 0.050" rpy="0 1.5707963 0"
+                    mat="mat_black" rgba="0.10 0.10 0.12 1.0"/>
   </link>
 
   <!-- ==================== Mecanum wheels (4, fixed joints; planar_move does not need the wheels to spin) ==================== -->
@@ -186,7 +227,7 @@
     <link name="wheel_${name}">
       <xacro:inertial_cyl m="${m_wheel}" r="${wheel_r}" l="${wheel_w}"/>
       <xacro:vis_mesh mesh="wheel_${side}.stl" xyz="0 0 0" rpy="1.5707963 0 1.5707963"
-                      mat="mat_wheel" rgba="0.07 0.07 0.08 1.0"/>
+                      mat="mat_wheel" rgba="0.17 0.17 0.18 1.0"/>
       <collision>
         <origin xyz="0 0 0" rpy="${pi/2} 0 0"/>
         <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
@@ -195,7 +236,7 @@
     <joint name="wheel_${name}_joint" type="fixed">
       <parent link="base_link"/>
       <child link="wheel_${name}"/>
-      <origin xyz="${x} ${y} ${wheel_r - base_z}" rpy="0 0 0"/>
+      <origin xyz="${x} ${y} ${axle_z}" rpy="0 0 0"/>
     </joint>
   </xacro:macro>
 
@@ -204,20 +245,20 @@
   <xacro:wheel name="rl" x="${-wheelbase/2}" y="${ track/2}" side="left"/>
   <xacro:wheel name="rr" x="${-wheelbase/2}" y="${-track/2}" side="right"/>
 
-  <!-- ==================== 2D lidar (position is a placeholder: in CAD it sits on the top plate front left) ==================== -->
+  <!-- ==================== 2D lidar (front centre of the deck) ==================== -->
   <link name="lidar_link">
     <xacro:inertial_cyl m="${m_lidar}" r="0.030" l="0.050"/>
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry><cylinder radius="0.030" length="0.050"/></geometry>
-      <material name="mat_lidar"><color rgba="0.62 0.62 0.65 1.0"/></material>
+      <material name="mat_lidar"><color rgba="0.55 0.55 0.58 1.0"/></material>
     </visual>
     <collision><geometry><cylinder radius="0.030" length="0.050"/></geometry></collision>
   </link>
   <joint name="lidar_joint" type="fixed">
     <parent link="base_link"/>
     <child link="lidar_link"/>
-    <origin xyz="0.070 -0.045 0.058" rpy="0 0 0"/>
+    <origin xyz="0.095 0 0.025" rpy="0 0 0"/>
   </joint>
 
   <!-- ==================== Gazebo: materials and friction ==================== -->

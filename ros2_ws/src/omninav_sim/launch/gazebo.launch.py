@@ -13,7 +13,7 @@ RViz2 visualisation (works headless; useful when the VM has no 3D acceleration):
 After launch:
   /cmd_vel  -> the planar_move plugin moves the robot body directly (omnidirectional)
   /odom     -> published by the plugin (the odom frame -> base_link TF is published by the plugin)
-  /scan     -> roof-mounted 2D lidar (360 rays, 10 Hz, 0.12-8 m)
+  /scan     -> deck-mounted 2D lidar (360 rays, 10 Hz, 0.12-8 m)
 
 Odom ownership switch (bridge mode):
   ros2 launch omninav_sim gazebo.launch.py gui:=false gazebo_odom:=false
@@ -105,8 +105,10 @@ def generate_launch_description():
             'use_sim_time', default_value='true',
             description='Use simulation time'),
         DeclareLaunchArgument(
-            'spawn_z', default_value='0.075',
-            description='Initial height of base_link (wheel radius 0.04 + chassis clearance 0.035)'),
+            'spawn_z', default_value='0.112',
+            description='Initial height of base_link. base_link sits on the top deck of the CAD model, '
+                        '109.8 mm above the ground (wheel radius 40.376 mm + 66.432 mm to the deck), '
+                        'so 0.112 leaves a 2 mm drop onto the wheels'),
         DeclareLaunchArgument(
             'gazebo_odom', default_value='true',
             description='Let planar_move publish /odom + odom->base_link TF; set false when '
