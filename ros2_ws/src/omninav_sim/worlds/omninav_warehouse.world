@@ -23,9 +23,9 @@
       <static>true</static>
       <pose>0 3.0 0.6 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box size="8.0 0.10 1.2"/></geometry></collision>
+        <collision name="collision"><geometry><box><size>8.0 0.10 1.2</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box size="8.0 0.10 1.2"/></geometry>
+          <geometry><box><size>8.0 0.10 1.2</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
         </visual>
       </link>
@@ -35,9 +35,9 @@
       <static>true</static>
       <pose>0 -3.0 0.6 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box size="8.0 0.10 1.2"/></geometry></collision>
+        <collision name="collision"><geometry><box><size>8.0 0.10 1.2</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box size="8.0 0.10 1.2"/></geometry>
+          <geometry><box><size>8.0 0.10 1.2</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
         </visual>
       </link>
@@ -47,9 +47,9 @@
       <static>true</static>
       <pose>4.0 0 0.6 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box size="0.10 6.0 1.2"/></geometry></collision>
+        <collision name="collision"><geometry><box><size>0.10 6.0 1.2</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box size="0.10 6.0 1.2"/></geometry>
+          <geometry><box><size>0.10 6.0 1.2</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
         </visual>
       </link>
@@ -59,9 +59,9 @@
       <static>true</static>
       <pose>-4.0 0 0.6 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box size="0.10 6.0 1.2"/></geometry></collision>
+        <collision name="collision"><geometry><box><size>0.10 6.0 1.2</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box size="0.10 6.0 1.2"/></geometry>
+          <geometry><box><size>0.10 6.0 1.2</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
         </visual>
       </link>
@@ -72,9 +72,9 @@
       <static>true</static>
       <pose>-1.5 2.45 0.45 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box size="2.0 0.50 0.90"/></geometry></collision>
+        <collision name="collision"><geometry><box><size>2.0 0.50 0.90</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box size="2.0 0.50 0.90"/></geometry>
+          <geometry><box><size>2.0 0.50 0.90</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/WoodPallet</name></script></material>
         </visual>
       </link>
@@ -84,9 +84,9 @@
       <static>true</static>
       <pose>2.6 -2.45 0.45 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box size="2.0 0.50 0.90"/></geometry></collision>
+        <collision name="collision"><geometry><box><size>2.0 0.50 0.90</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box size="2.0 0.50 0.90"/></geometry>
+          <geometry><box><size>2.0 0.50 0.90</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/WoodPallet</name></script></material>
         </visual>
       </link>
@@ -97,9 +97,9 @@
       <static>true</static>
       <pose>1.2 1.0 0.20 0 0 0.3</pose>
       <link name="link">
-        <collision name="collision"><geometry><box size="0.40 0.40 0.40"/></geometry></collision>
+        <collision name="collision"><geometry><box><size>0.40 0.40 0.40</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box size="0.40 0.40 0.40"/></geometry>
+          <geometry><box><size>0.40 0.40 0.40</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
         </visual>
       </link>
@@ -109,9 +109,9 @@
       <static>true</static>
       <pose>-2.2 -1.1 0.15 0 0 0.0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box size="0.30 0.30 0.30"/></geometry></collision>
+        <collision name="collision"><geometry><box><size>0.30 0.30 0.30</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box size="0.30 0.30 0.30"/></geometry>
+          <geometry><box><size>0.30 0.30 0.30</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
         </visual>
       </link>
