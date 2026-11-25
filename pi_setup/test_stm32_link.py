@@ -117,21 +117,23 @@ def show(tag, buf, keep=14):
 def raw_text(buf):
     """Whole stream as one string.
 
-    ★ 判据必须用这个，不能按"整行"匹配 —— STM32 是一收到字节就回显的，
-    而回显是一字不差地把原字节反射回来、不会替我们补换行。所以发一帧不带
-    换行的数据时，回显会和 STM32 下一条自发输出（#HB / [U2] / #STAT）
-    粘成同一行。按行 startswith 匹配会假失败（T2/T7 第一版就是这么挂的）。
+    ★ The criteria must use this, never per-line matching -- the STM32 echoes each
+    byte as it arrives, verbatim, and does not add a newline for us. So when a
+    frame is sent without a trailing newline, the echo merges into the same line
+    as the STM32's next unsolicited output (#HB / [U2] / #STAT). Matching with
+    per-line startswith gives false failures (that is how T2/T7 first failed).
     """
     return buf.decode("ascii", "replace")
 
 
 def local_key(fd, key):
-    """Send a local command. ★ 必须带 '.' 前缀。
+    """Send a local command. ★ It must carry the '.' prefix.
 
-    第一版把本地命令写成裸字符，结果协议命令 `reset` 里的 'e' 被本地
-    "切换回显" 命令吃掉，解析器只收到 'rst' -> cmd=UNKNOWN。
-    固件侧已改成前缀状态机；如果这里漏了前缀，T1/T4 的清计数会失效、
-    T7 会直接把 '?' 当协议字节喂进解析器。
+    The first version sent bare local commands, so the 'e' in the protocol command
+    `reset` was eaten by the local "toggle echo" command and the parser received
+    only 'rst' -> cmd=UNKNOWN. The firmware side has been changed to a prefix state
+    machine; if the prefix is missing here, the counter clears in T1/T4 break and
+    T7 feeds '?' straight into the parser as a protocol byte.
     """
     send(fd, "." + key)
 
@@ -163,14 +165,17 @@ def main():
             if m:
                 ticks.append(int(m.group(1)))
         gaps = [ticks[i + 1] - ticks[i] for i in range(len(ticks) - 1)]
-        # ★ 容差 ±30 ms，不是 ±5 ms。为什么：
-        #   STM32 用的是阻塞式 HAL_UART_Transmit，而心跳的时间戳是在**发送那一刻**
-        #   取的。主循环里除了心跳还要打 `[U2] rx=...` 状态行（约 110 字符，
-        #   115200 下 ≈ 9.5 ms 的空口时间）。状态行恰好压在某个心跳的截止点上时，
-        #   那个心跳的**发送时刻**就会被推到后面 10~20 ms —— 实测
-        #   `gaps=[1000, 1000, 1015]`，而那个 1015 正好紧跟状态行。
-        #   ⇒ 这测的是"发送时刻"，不是"时基"。时基本身是准的：没有状态行干扰的
-        #     相邻两拍永远是整 1000。正式固件会改成 DMA/中断发送，抖动自然消失。
+        # ★ Tolerance is ±30 ms, not ±5 ms. Why:
+        #   The STM32 uses blocking HAL_UART_Transmit, and the heartbeat timestamp is
+        #   taken at **the moment of transmission**. Besides the heartbeat, the main
+        #   loop also prints a `[U2] rx=...` status line (about 110 chars, ~9.5 ms of
+        #   air time at 115200). When a status line lands right on a heartbeat's
+        #   deadline, that heartbeat's **transmit instant** is pushed back 10-20 ms --
+        #   measured `gaps=[1000, 1000, 1015]`, and that 1015 immediately follows the
+        #   status line. => This measures "transmit instants", not "the timebase"; the
+        #   timebase itself is accurate (without status-line interference adjacent
+        #   beats are always exactly 1000). The final firmware will use DMA/interrupt
+        #   transmission, so the jitter disappears naturally.
         JITTER_MS = 30
         ok = len(hb) >= 3 and bool(gaps) and all(
             1000 - JITTER_MS <= g <= 1000 + JITTER_MS for g in gaps)
@@ -257,7 +262,7 @@ def main():
         b = collect(fd, 1.0)
         ls = show("T7", b)
         blob = raw_text(b)
-        # ★ 用子串匹配：'.' 的回显会和 '[U2] rx=' 粘在同一行（见 raw_text 的注释）
+        # ★ Use substring matching: the '.' echo merges into the same line as '[U2] rx=' (see raw_text's comment)
         has_stat = "#STAT" in blob
         has_u2 = "[U2] rx=" in blob
         ok = has_stat and has_u2

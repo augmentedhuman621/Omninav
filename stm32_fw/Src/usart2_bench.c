@@ -1,154 +1,175 @@
 /**
- * usart2_bench.c —— USART2 链路自证台（OmniNav 下位机 ↔ 树莓派 5 的唯一数据链）
+ * usart2_bench.c -- USART2 link self-test bench (the only data link between the
+ *                  OmniNav lower controller and the Raspberry Pi 5)
  * =============================================================================
  *
- * 这个文件是干什么的
+ * What this file is for
  * -----------------------------------------------------------------------------
- *   证明「树莓派 5 ↔ STM32」这条线真的通了，并且把 `firmware_core` 的协议层
- *   放到真机上跑一遍。它是**诊断工具**，不是最终固件 —— 最终固件里 USART2 会被
- *   控制环以 50 Hz 使用，而这里是一问一答 + 心跳。
+ *   Proves that the "Raspberry Pi 5 <-> STM32" wire really works, and runs the
+ *   firmware_core protocol layer once on the real hardware. It is a DIAGNOSTIC
+ *   tool, not the final firmware -- in the final firmware USART2 is driven by the
+ *   control loop at 50 Hz, whereas here it is request/response + heartbeat.
  *
- *   上电默认就进这里（见 main.c 的上电选路）；3 秒内在 USART1(COM9) 上按 'm'
- *   会切到原来的电机/探针台架 bench.c。
+ *   Power-up boots into here by default (see the boot routing in main.c); pressing
+ *   'm' on USART1 (COM9) within 3 s switches to the original motor/probe bench,
+ *   bench.c.
  *
- * 硬件接线（已在 2026-10 由用户接好）
+ * Hardware wiring (done by the user in 2026-10)
  * -----------------------------------------------------------------------------
- *   STM32 PA2 (USART2_TX)  ──►  USB-TTL 模块 RXD
- *   STM32 PA3 (USART2_RX)  ◄──  USB-TTL 模块 TXD
- *   STM32 GND              ◄──► USB-TTL 模块 GND
- *   USB-TTL 模块 VCC       ——   不接（STM32 由 ST-Link/DC 座供电）
+ *   STM32 PA2 (USART2_TX)  -->  USB-TTL module RXD
+ *   STM32 PA3 (USART2_RX)  <--  USB-TTL module TXD
+ *   STM32 GND              <->  USB-TTL module GND
+ *   USB-TTL module VCC     ---  leave open (STM32 is powered from ST-Link/DC jack)
  *
- *   ★★★ P5 跳线帽必须拔掉
+ *   *** P5 jumper MUST be removed
  * -----------------------------------------------------------------------------
- *   精英版把 PA2 / PA3 引到一个叫 **P5 USART2** 的 4 针座（板子左下角、DC 电源
- *   座旁边），丝印是 2x2：
+ *   The Elite board brings PA2 / PA3 out to a 4-pin header called **P5 USART2**
+ *   (bottom-left corner of the board, next to the DC power jack), silkscreen 2x2:
  *
- *        ┌──────┬──────┐
- *        │ 48T  │ 48R  │   ← 接板载 SP3485（RS485 收发器）
- *        ├──────┼──────┤
- *        │ PA3  │ PA2  │   ← STM32 的 USART2_RX / USART2_TX
- *        └──────┴──────┘
+ *        +------+------+
+ *        | 48T  | 48R  |   <- wired to the on-board SP3485 (RS485 transceiver)
+ *        +------+------+
+ *        | PA3  | PA2  |   <- STM32 USART2_RX / USART2_TX
+ *        +------+------+
  *
- *   跳线帽 = 上下两针短接。**帽子插着 ⇒ PA2/PA3 挂在 SP3485 上**（485 模式），
- *   此时 TTL 信号被 485 芯片拖拽，现象是"完全收不到"或"满屏乱码"。
- *   **帽子拔掉 ⇒ PA2/PA3 与 485 断开，那两个孔就是纯 3.3 V TTL，可以直接插杜邦线。**
- *   （依据：正点原子论坛 311106「P5 的跳线帽去掉时可以做 RS485 转 TTL 使用」）
+ *   The jumper shorts the two rows. **Jumper fitted => PA2/PA3 sit on the SP3485**
+ *   (485 mode); the TTL signal is then loaded by the 485 chip, and the symptom is
+ *   "nothing is received at all" or "screens full of garbage".
+ *   **Jumper removed => PA2/PA3 are cut from the 485 chip, and those two holes are
+ *   pure 3.3 V TTL, ready for Dupont wires.**
+ *   (Source: ALIENTEK forum thread 311106 "with the P5 jumper removed it can be
+ *   used as RS485-to-TTL")
  *
- *   30 秒判定帽子拔没拔：万用表蜂鸣档，一表笔点 PA2 孔、另一支点 48R 孔 ——
- *   响 / 0 Ω ⇒ 帽子还插着（必须拔）；不通 ⇒ 已拔（可用）。
+ *   Check the jumper in 30 s: multimeter in continuity mode, one probe on the PA2
+ *   hole and the other on the 48R hole -- beep / 0 ohm => jumper still fitted (must
+ *   be removed); open => removed (usable).
  *
- *   另外：只走 TTL 时 **PD7（485 方向使能）完全不用管**。
+ *   Also: with TTL only, **PD7 (485 direction enable) needs no attention at all**.
  *
- * 三个坑（都踩过或在别的文件里记过）
+ * Three pitfalls (all hit before, or recorded in other files)
  * -----------------------------------------------------------------------------
- *   1) **绝不能重定向 printf**。Keil 不勾 MicroLIB 时 printf 会触发半主机
- *      (semihosting) 把程序卡死；本文件用一个 60 行的自研格式化器，不碰 <stdio.h>。
- *   2) **USART2 挂在 APB1 = 36 MHz，不是 APB2 的 72 MHz**。HAL 会自己按 PCLK1
- *      算 BRR，但必须把算出来的 BRR 打出来核对（期望 0x0138）。
- *   3) **输出只许 ASCII**（交接单坑 26）。自研格式化器不支持中文，写了会变 '?'。
+ *   1) **Never redirect printf**. Without MicroLIB checked, Keil's printf pulls in
+ *      semihosting and hangs the program; this file uses a ~60-line formatter of
+ *      its own and never touches <stdio.h>.
+ *   2) **USART2 hangs off APB1 = 36 MHz, not APB2's 72 MHz**. HAL computes BRR
+ *      from PCLK1 by itself, but the resulting BRR must be printed and checked
+ *      (expected 0x0138).
+ *   3) **Output must be ASCII only** (handover pitfall 26). The custom formatter
+ *      does not support Chinese; non-ASCII comes out as '?'.
  *
- * 为什么用"中断收 + 环形缓冲"而不是轮询
+ * Why interrupt-driven RX + ring buffer instead of polling
  * -----------------------------------------------------------------------------
- *   回显是逐字节阻塞发送的，单字节 @115200 要 ~87 us。若用轮询收，发送期间到达
- *   的字节会被硬件 ORE 丢掉，回显就不再是逐字节可验证的 ⇒ 测出来的"丢字节"分不清
- *   是线路问题还是固件问题。所以：**RXNE 中断 + 256 字节环形缓冲**，
- *   中断里只做"读 DR、进队列"，其余全在主循环，绝不调用 HAL。
+ *   Echo is sent blocking, byte by byte; one byte at 115200 takes ~87 us. With
+ *   polled RX the bytes arriving during a transmit are lost to hardware ORE, so the
+ *   echo is no longer verifiable byte by byte => a measured "byte loss" cannot be
+ *   attributed to the wire or to the firmware. Therefore: **RXNE interrupt +
+ *   256-byte ring buffer**; the ISR only does "read DR, enqueue", everything else
+ *   runs in the main loop and never calls HAL.
  *
- *   同时**不走 HAL 的 HAL_UART_Receive_IT**（它的状态机在 ORE 时会中断接收、
- *   需要 ErrorCallback 里重新武装，很容易把 RX 卡死）。这里自己写 USART2_IRQHandler，
- *   直接读 SR/DR —— 读 SR 再读 DR 一次就把 RXNE 和 ORE 都清了，ORE 永远卡不住我们。
- *   stm32f1xx_it.c 里没有定义过 USART2_IRQHandler，所以不冲突。
+ *   At the same time **do not use HAL's HAL_UART_Receive_IT** (its state machine
+ *   stops receiving on ORE and has to be re-armed in ErrorCallback, which easily
+ *   wedges RX). Instead this file implements USART2_IRQHandler itself and reads
+ *   SR/DR directly -- one SR read followed by one DR read clears both RXNE and ORE,
+ *   so ORE can never stall us. stm32f1xx_it.c never defined USART2_IRQHandler, so
+ *   there is no clash.
  *
- * 怎么用（树莓派侧）
+ * How to use it (Raspberry Pi side)
  * -----------------------------------------------------------------------------
- *   设备名：/dev/ttySTM32（udev 规则已装，指向 ttyUSB0）
- *   参数  ：115200 8N1，无流控
+ *   device: /dev/ttySTM32 (udev rule installed, points at ttyUSB0)
+ *   params: 115200 8N1, no flow control
  *
- *   看心跳（证明 STM32 → 树莓派 方向）：
+ *   Watch the heartbeat (proves STM32 -> Raspberry Pi direction):
  *     python3 -c "import serial;s=serial.Serial('/dev/ttySTM32',115200,timeout=3);print(s.readline())"
  *
- *   发一条运动指令（证明 树莓派 → STM32 方向 + 协议层）：
+ *   Send one motion command (proves Raspberry Pi -> STM32 direction + protocol):
  *     printf 'V,100,0,0\n' > /dev/ttySTM32
- *     ⇒ 本地会原样回显 `V,100,0,0`，并且 STM32 回一行 `#ACK V 3`
+ *     => echoed back locally as `V,100,0,0`, and the STM32 answers one line
+ *        `#ACK V 3`
  *
- *   本文件配套脚本：pi_setup/test_stm32_link.py（一次跑完全部自证并给结论）
+ *   Companion script for this file: pi_setup/test_stm32_link.py (runs the whole
+ *   self-test in one go and reports a verdict)
  * =============================================================================
  */
 
 #include "usart2_bench.h"
 #include "main.h"
-#include "bench.h"        /* 只为上电选路时切到 bench_run() */
-#include "protocol.h"     /* firmware_core，已在 Keil 工程 IncludePath 里 */
-#include "mecanum.h"      /* firmware_core：麦轮逆解/正解 + 一键求解（影子模式用） */
-#include "fixedpoint.h"   /* firmware_core：mm/s -> 计数/控制窗口（PID 设定值） */
+#include "bench.h"        /* only to switch to bench_run() during boot routing */
+#include "protocol.h"     /* firmware_core, already on the Keil IncludePath */
+#include "mecanum.h"      /* firmware_core: mecanum inverse/forward + one-call solve (shadow mode) */
+#include "fixedpoint.h"   /* firmware_core: mm/s -> counts per control window (PID setpoint) */
 #include <stdarg.h>
 
-/* USART1 的句柄定义在 main.c（同 bench.c 的写法） */
+/* The USART1 handle is defined in main.c (same style as bench.c) */
 extern UART_HandleTypeDef huart1;
 
-/* 覆盖 startup_stm32f103xe.s 里的 weak 默认实现。
- * ★ stm32f1xx_it.c 里没有定义过它，所以不冲突。 */
+/* Overrides the weak default implementation in startup_stm32f103xe.s.
+ * stm32f1xx_it.c never defined it, so there is no clash. */
 void USART2_IRQHandler(void);
 
 /* ===========================================================================
- * 配置
+ * Configuration
  * =========================================================================== */
 
-#define U2_BAUD          115200u   /* 契约冻结值，不许改 */
-#define U2_FIFO_SZ       256u      /* 必须是 2 的幂 */
+#define U2_BAUD          115200u   /* frozen by contract, do not change */
+#define U2_FIFO_SZ       256u      /* must be a power of two */
 #define U2_FIFO_MASK     (U2_FIFO_SZ - 1u)
-#define HB_PERIOD_MS     1000u     /* 心跳周期 */
-#define STAT_PERIOD_MS   5000u     /* 统计行周期 */
-#define U2_LINE_MAX      160u      /* 单行输出缓冲 */
+#define HB_PERIOD_MS     1000u     /* heartbeat period */
+#define STAT_PERIOD_MS   5000u     /* status line period */
+#define U2_LINE_MAX      160u      /* single line output buffer */
 
-/* proto_cmd_t 的取值个数（NONE/V/M/P/S/RESET/UNKNOWN） */
+/* number of proto_cmd_t values (NONE/V/M/P/S/RESET/UNKNOWN) */
 #define U2_CMD_SLOTS     7u
 
-/* ★★ 本地命令前缀。必须是协议字符集之外的字符（协议只用字母/数字/','/'-'/'\n'）。
- *    用 '.' 的理由：它永远不可能出现在协议帧里，所以绝不会误拦正常命令；
- *    即使漏进解析器也只会被判 BAD_CHAR，不会污染后续帧。
- *    ⇒ 本地命令写法：'.?' '.e' '.h' '.a' '.c' '.k'（见 u2_handle_byte() 的注释） */
+/* ** Local command prefix. Must be a character outside the protocol charset
+ *    (the protocol only uses letters/digits/','/'-'/'\n').
+ *    Why '.': it can never appear in a protocol frame, so it can never swallow a
+ *    normal command by mistake; even if it leaks into the parser it is only
+ *    flagged BAD_CHAR and never pollutes the following frames.
+ *    => local commands are written '.?' '.e' '.h' '.a' '.c' '.k' (see u2_handle_byte()) */
 #define U2_LOCAL_PREFIX  '.'
 
 /* ===========================================================================
- * 状态
+ * State
  * =========================================================================== */
 
 static UART_HandleTypeDef huart2;
 
-/* --- 接收环形缓冲（中断写 head，主循环读 tail） --- */
+/* --- receive ring buffer (ISR writes head, main loop reads tail) --- */
 static volatile uint8_t  s_fifo[U2_FIFO_SZ];
 static volatile uint16_t s_head;
 static volatile uint16_t s_tail;
-static volatile uint32_t s_drop;      /* 队列满丢掉的字节数 */
-static volatile uint32_t s_rxerr;     /* ORE/FE/NE/PE 次数 */
+static volatile uint32_t s_drop;      /* bytes dropped because the queue was full */
+static volatile uint32_t s_rxerr;     /* ORE/FE/NE/PE count */
 
-/* --- 统计 --- */
-static uint32_t s_rx_bytes;           /* PA3 收到多少字节 */
-static uint32_t s_echo_bytes;         /* 回显出去多少字节 */
-static uint32_t s_hb_count;           /* 发了多少次心跳 */
+/* --- statistics --- */
+static uint32_t s_rx_bytes;           /* bytes received on PA3 */
+static uint32_t s_echo_bytes;         /* bytes echoed back */
+static uint32_t s_hb_count;           /* heartbeats sent */
 static uint32_t s_cmd_count[U2_CMD_SLOTS];
 
-/* --- 开关 --- */
-static uint8_t s_echo_on = 1u;        /* '.e' 切换，默认开 */
-static uint8_t s_hb_on   = 1u;        /* '.h' 切换，默认开 */
-static uint8_t s_ack_on  = 1u;        /* '.a' 切换，默认开 */
+/* --- switches --- */
+static uint8_t s_echo_on = 1u;        /* toggled by '.e', on by default */
+static uint8_t s_hb_on   = 1u;        /* toggled by '.h', on by default */
+static uint8_t s_ack_on  = 1u;        /* toggled by '.a', on by default */
 
-/* 影子模式：'.s' 切换，**默认关**。
- * ★ 关着的时候，USART2 上的**逐帧行为**与"11/11 链路自证"基线完全一致
- *   （唯一差别是启动 banner 多了两行文字，那是一次性的、测试脚本不看它）。
- * ★ 打开以后每帧多 5 行 —— logf() 是"两个口都发"（见 send_on/logf），
- *   所以影子结果在 COM9 和树莓派两侧都能看到。 */
+/* Shadow mode: toggled by '.s', **off by default**.
+ * While it is off, the **per-frame behaviour** on USART2 is identical to the
+ * "11/11 link self-test" baseline (the only difference is two extra lines in the
+ * boot banner, which are one-shot and not inspected by the test script).
+ * While it is on, every frame gains 5 extra lines -- logf() sends on **both
+ * ports** (see send_on/logf), so shadow results are visible on COM9 and on the
+ * Raspberry Pi side alike. */
 static uint8_t s_shadow_on;
 
-/* --- 本地命令前缀状态（收到 U2_LOCAL_PREFIX 后置 1，下一个字节是命令字母） --- */
+/* --- local command prefix state (set to 1 after U2_LOCAL_PREFIX; the next byte
+ *     is the command letter) --- */
 static uint8_t s_local_mode;
 
 static proto_parser_t s_parser;
 static proto_msg_t    s_msg;
 
 /* ===========================================================================
- * 迷你格式化器（故意不支持 %f / 64 位 / 宽度补零 —— 本文件用不到）
+ * Mini formatter (deliberately no %f / 64-bit / zero padding -- unused here)
  * =========================================================================== */
 
 static void fmt_put(char *out, int cap, int *pn, char ch)
@@ -175,9 +196,9 @@ static void fmt_num(char *out, int cap, int *pn, unsigned long v,
 }
 
 /**
- * 支持的转换：%s %c %d %i %u %x %X %%
- * 其余（宽度、'0' 标志、l/h 前缀）会被跳过，不做补零对齐。
- * 返回值 = 写入长度（不含结尾 NUL）；若 >= cap 说明被截断了。
+ * Supported conversions: %s %c %d %i %u %x %X %%
+ * Anything else (field width, '0' flag, l/h prefix) is skipped; no padding/alignment.
+ * Return value = number of bytes written (excluding the trailing NUL); >= cap means truncated.
  */
 static int fmt_v(char *out, int cap, const char *fmt, va_list ap)
 {
@@ -191,9 +212,9 @@ static int fmt_v(char *out, int cap, const char *fmt, va_list ap)
         if (*fmt == '\0') { break; }
         if (*fmt == '%')  { fmt_put(out, cap, &n, '%'); fmt++; continue; }
 
-        /* 跳过标志位与字段宽度（本文件不依赖对齐） */
+        /* skip flag characters and field width (this file does not rely on alignment) */
         while (*fmt == '0' || (*fmt >= '1' && *fmt <= '9')) { fmt++; }
-        /* 跳过 l / h 长度前缀 */
+        /* skip l / h length prefixes */
         while (*fmt == 'l' || *fmt == 'h') { fmt++; }
 
         switch (*fmt)
@@ -218,7 +239,7 @@ static int fmt_v(char *out, int cap, const char *fmt, va_list ap)
             if (v < 0)
             {
                 fmt_put(out, cap, &n, '-');
-                /* INT_MIN 安全写法 */
+                /* INT_MIN-safe formulation */
                 fmt_num(out, cap, &n, (unsigned long)(-(v + 1)) + 1ul, 10ul, 0);
             }
             else
@@ -237,7 +258,7 @@ static int fmt_v(char *out, int cap, const char *fmt, va_list ap)
             fmt_num(out, cap, &n, (unsigned long)va_arg(ap, unsigned int), 16ul, 1);
             break;
         default:
-            /* 不认识的转换：原样吐出去，方便发现写错 */
+            /* unknown conversion: emit it verbatim so typos are visible */
             fmt_put(out, cap, &n, '%');
             fmt_put(out, cap, &n, *fmt);
             break;
@@ -253,7 +274,7 @@ static int fmt_v(char *out, int cap, const char *fmt, va_list ap)
 }
 
 /* ===========================================================================
- * 输出：两个口都发 / 只发 USART2
+ * Output: both ports / USART2 only
  * =========================================================================== */
 
 static void send_on(UART_HandleTypeDef *h, const char *s, int n)
@@ -262,7 +283,7 @@ static void send_on(UART_HandleTypeDef *h, const char *s, int n)
     (void)HAL_UART_Transmit(h, (const uint8_t *)s, (uint16_t)n, HAL_MAX_DELAY);
 }
 
-/** 同一行同时打到 USART1（电脑 COM9）和 USART2（树莓派）—— 便于两处对照 */
+/** Put the same line on USART1 (PC COM9) and USART2 (Raspberry Pi) for side-by-side comparison */
 static void logf(const char *fmt, ...)
 {
     static char buf[U2_LINE_MAX];
@@ -278,7 +299,7 @@ static void logf(const char *fmt, ...)
     send_on(&huart2, buf, n);
 }
 
-/** 只打 USART2 —— 机器可读的行（'#' 开头），不污染 COM9 */
+/** USART2 only -- machine-readable lines (starting with '#'), keeps COM9 clean */
 static void u2f(const char *fmt, ...)
 {
     static char buf[U2_LINE_MAX];
@@ -294,7 +315,7 @@ static void u2f(const char *fmt, ...)
 }
 
 /* ===========================================================================
- * USART2 初始化
+ * USART2 init
  * =========================================================================== */
 
 static void u2_init(void)
@@ -304,15 +325,16 @@ static void u2_init(void)
     __HAL_RCC_GPIOA_CLK_ENABLE();
     __HAL_RCC_USART2_CLK_ENABLE();
 
-    /* PA2 = USART2_TX：复用推挽。PA2/PA3 是 USART2 的**默认**引脚，不需要重映射，
-     * 所以这里**不碰 AFIO**（bench.c 里给 TIM1 做的完全重映射与这里无冲突）。 */
+    /* PA2 = USART2_TX: alternate-function push-pull. PA2/PA3 are the **default**
+     * pins of USART2 and need no remap, so **AFIO is not touched here** (the TIM1
+     * full remap done in bench.c does not conflict with it). */
     gpio.Pin   = GPIO_PIN_2;
     gpio.Mode  = GPIO_MODE_AF_PP;
     gpio.Pull  = GPIO_NOPULL;
     gpio.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOA, &gpio);
 
-    /* PA3 = USART2_RX：浮空输入（HAL 对 UART 的 RX 要求 INPUT + NOPULL，同 PA10） */
+    /* PA3 = USART2_RX: floating input (HAL wants INPUT + NOPULL for UART RX, same as PA10) */
     gpio.Pin   = GPIO_PIN_3;
     gpio.Mode  = GPIO_MODE_INPUT;
     gpio.Pull  = GPIO_NOPULL;
@@ -334,16 +356,16 @@ static void u2_init(void)
         for (;;) { }
     }
 
-    /* 只开 RXNE 中断，不走 HAL 的 Receive_IT（理由见文件头） */
+    /* Enable only the RXNE interrupt, do not use HAL's Receive_IT (see file header) */
     HAL_NVIC_SetPriority(USART2_IRQn, 1u, 0u);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
     __HAL_UART_ENABLE_IT(&huart2, UART_IT_RXNE);
 }
 
 /**
- * USART2 中断服务程序。
- * 只做两件事：把收到的字节塞进环形缓冲；把错误标志清掉。
- * ★ 绝不在这里调用任何 HAL 发送函数（HAL_UART_Transmit 不是可重入的）。
+ * USART2 interrupt service routine.
+ * Only two jobs: push received bytes into the ring buffer, and clear the error flags.
+ * Never call any HAL transmit function here (HAL_UART_Transmit is not reentrant).
  */
 void USART2_IRQHandler(void)
 {
@@ -351,12 +373,12 @@ void USART2_IRQHandler(void)
 
     if ((sr & USART_SR_RXNE) != 0u)
     {
-        uint8_t b = (uint8_t)(USART2->DR & 0xFFu);   /* 读 DR 同时清 RXNE / ORE */
+        uint8_t b = (uint8_t)(USART2->DR & 0xFFu);   /* reading DR clears RXNE / ORE too */
         uint16_t next = (uint16_t)((s_head + 1u) & U2_FIFO_MASK);
 
         if (next == s_tail)
         {
-            s_drop++;                                 /* 队列满：丢新的，不覆盖旧的 */
+            s_drop++;                                 /* queue full: drop the new byte, never overwrite the old */
         }
         else
         {
@@ -366,12 +388,12 @@ void USART2_IRQHandler(void)
     }
     else if ((sr & (USART_SR_ORE | USART_SR_FE | USART_SR_NE | USART_SR_PE)) != 0u)
     {
-        (void)USART2->DR;                             /* 清错误标志 */
+        (void)USART2->DR;                             /* clear the error flags */
         s_rxerr++;
     }
 }
 
-/** 从环形缓冲取一个字节；返回 1 = 取到 */
+/** Pop one byte from the ring buffer; returns 1 = got one */
 static int u2_pop(uint8_t *b)
 {
     if (s_tail == s_head) { return 0; }
@@ -381,7 +403,7 @@ static int u2_pop(uint8_t *b)
 }
 
 /* ===========================================================================
- * 输出内容
+ * Output content
  * =========================================================================== */
 
 static void u2_banner(void)
@@ -410,7 +432,7 @@ static void u2_heartbeat(void)
 {
     if (s_hb_on == 0u) { return; }
     s_hb_count++;
-    /* 机器可读行：'#' 开头，树莓派侧一眼能认出来 */
+    /* machine-readable line: starts with '#', easy to spot on the Raspberry Pi */
     u2f("#HB %u %u\r\n", (unsigned)HAL_GetTick(), (unsigned)s_hb_count);
 }
 
@@ -430,7 +452,7 @@ static void u2_status(void)
          (unsigned)s_parser.stat_bad);
 }
 
-/** 'k' —— 主动吐一串固定测试模式，让树莓派校验"逐字节一致" */
+/** 'k' -- dump a fixed test pattern so the Raspberry Pi can check "byte-for-byte identical" */
 static void u2_kick(void)
 {
     logf("[U2] kick: sending fixed pattern on USART2\r\n");
@@ -438,25 +460,29 @@ static void u2_kick(void)
 }
 
 /* ---------------------------------------------------------------------------
- * 影子模式（'.s' 切换，默认关）—— B1
+ * Shadow mode (toggled by '.s', off by default) -- B1
  *
- *   把一条 `V,<vx>,<vy>,<w>` 真的走一遍**最终固件要走的那条路**：
+ *   Runs a `V,<vx>,<vy>,<w>` frame through **the same path the final firmware
+ *   will take**:
  *
- *       协议帧(mecanum_twist_t)
- *         -> mecanum_solve()        逆解 + 饱和归一 + 死区抬升 + 装配映射
- *         -> fixp_mm_s_to_counts()  mm/s -> 本控制窗口的编码器计数
+ *       protocol frame (mecanum_twist_t)
+ *         -> mecanum_solve()        inverse + saturate normalize + deadzone lift + mount map
+ *         -> fixp_mm_s_to_counts()  mm/s -> encoder counts for this control window
  *
- *   ★ 只打印，不驱动任何电机 —— 这是台架，电机还没接、PID 还没写。
- *     打印的 `target=` 就是将来要喂给速度环 PID 的**设定值**，
- *     也就是"协议帧 → 轮子"这条链上唯一还看不见的一环。
+ *   Only prints, never drives a motor -- this is a bench: the motors are not
+ *   wired yet and the PID is not written yet. The printed `target=` is the
+ *   **setpoint** that will later feed the speed-loop PID, i.e. the only link in
+ *   the "protocol frame -> wheels" chain that is still invisible.
  *
- *   ★ 输出走 logf()，而 logf() 是**两个口都发**（USART1/COM9 + USART2/树莓派），
- *     所以影子结果在两侧都能看到。默认关着 ⇒ 对
- *     pi_setup/test_stm32_link.py 的 11/11 **逐帧无影响**；打开后每帧多 5 行，
- *     可能把某个心跳的发送时刻推后十几毫秒（T1 的容差是 30 ms）。
+ *   Output goes through logf(), and logf() sends on **both ports** (USART1/COM9 +
+ *   USART2/Raspberry Pi), so shadow results are visible on both sides. Off by
+ *   default => **no per-frame effect** on the 11/11 in
+ *   pi_setup/test_stm32_link.py; when on, every frame gains 5 lines and may push
+ *   a heartbeat out by a dozen milliseconds (T1's tolerance is 30 ms).
  *
- *   为什么默认关：这个文件首先是"链路自证基线"，基线必须可复现；
- *   影子模式是它的下游消费者，不能改变它的输出。
+ *   Why off by default: this file is first of all the "link self-test baseline",
+ *   and a baseline must be reproducible; shadow mode is a downstream consumer of
+ *   it and must not change its output.
  * ------------------------------------------------------------------------- */
 static void u2_shadow_v(int32_t vx, int32_t vy, int32_t w)
 {
@@ -476,7 +502,7 @@ static void u2_shadow_v(int32_t vx, int32_t vy, int32_t w)
 
     if (mecanum_geom_is_valid(&geom) != 1)
     {
-        logf("[SHADOW] geom INVALID -> 四轮全部置 0（不会输出假速度）\r\n");
+        logf("[SHADOW] geom INVALID -> all four wheels forced to 0 (never emits fake speeds)\r\n");
         return;
     }
 
@@ -498,7 +524,7 @@ static void u2_shadow_v(int32_t vx, int32_t vy, int32_t w)
     }
 }
 
-/** 一条完整协议报文解出来了 */
+/** A complete protocol message has been decoded */
 static void u2_on_message(const proto_msg_t *m)
 {
     char raw[PROTO_LINE_MAX + 1];
@@ -519,8 +545,9 @@ static void u2_on_message(const proto_msg_t *m)
              (int)m->arg[3], (int)m->arg[4], (int)m->arg[5]);
     }
 
-    /* 影子模式：V 帧真的算一遍（只打印，不驱动；见 u2_shadow_v）
-     * 要求 error == NONE 且 argc >= 3 —— 被标了错的帧不许产生"看起来能用"的目标值。 */
+    /* Shadow mode: actually compute the V frame (print only, no drive; see u2_shadow_v)
+     * Requires error == NONE and argc >= 3 -- a frame flagged as bad must never
+     * produce a "looks usable" target value. */
     if ((s_shadow_on != 0u) && (m->cmd == PROTO_CMD_V) &&
         (m->error == PROTO_ERR_NONE) && (m->argc >= 3u))
     {
@@ -533,32 +560,36 @@ static void u2_on_message(const proto_msg_t *m)
     }
 }
 
-/** 收到一个字节：先无条件回显，再判断是本地命令还是协议帧
+/** One byte received: echo it unconditionally first, then decide whether it is a
+ * local command or a protocol frame
  *
- *  ★★ 为什么本地命令必须带前缀 '.'，不能是裸字符：
- *     第一版把本地命令写成裸的 ? e h a c k，实机一跑就撞车 —— 协议命令
- *     `reset` 里的第二个字符就是 'e'，于是树莓派发 `reset\n` 时：
- *          r  -> 进解析器（缓冲 "r"）
- *          e  -> 被本地命令吃掉，顺手把回显关了（!!）
- *          s  -> 进解析器
- *          t  -> 进解析器
- *     解析器最后只看到 "rst" -> cmd=UNKNOWN。协议层完全没错，是这一层拦错了。
- *     ⇒ 用 '.' 作前缀：'.' 不在任何协议命令字符集里，永远不可能误拦；
- *       而且 '.' 本身也不是数字/逗号/换行，喂给解析器也只会被判 BAD_CHAR，
- *       所以绝不会污染正常帧。
+ *  Why local commands must carry the '.' prefix and cannot be bare characters:
+ *     the first version used bare ? e h a c k, and it collided on real hardware --
+ *     the second character of protocol command `reset` is 'e', so when the
+ *     Raspberry Pi sent `reset\n`:
+ *          r  -> went to the parser (buffer "r")
+ *          e  -> swallowed by the local command, which also turned echo off (!!)
+ *          s  -> went to the parser
+ *          t  -> went to the parser
+ *     the parser finally saw only "rst" -> cmd=UNKNOWN. The protocol layer was
+ *     entirely correct; this layer swallowed it.
+ *     => use '.' as the prefix: '.' is in no protocol command charset, so it can
+ *        never swallow a command by mistake; and '.' is neither a digit, a comma
+ *        nor a newline, so feeding it to the parser only yields BAD_CHAR and can
+ *        never pollute a normal frame.
  * ------------------------------------------------------------------------- */
 static void u2_handle_byte(uint8_t b)
 {
     s_rx_bytes++;
 
-    /* ① 原样回显（loopback 判据：树莓派写什么就应读到什么） */
+    /* (1) echo verbatim (loopback criterion: whatever the Raspberry Pi writes must come back) */
     if (s_echo_on != 0u)
     {
         (void)HAL_UART_Transmit(&huart2, &b, 1u, HAL_MAX_DELAY);
         s_echo_bytes++;
     }
 
-    /* ② 前缀已激活：这一个是本地命令字母 */
+    /* (2) prefix active: this byte is the local command letter */
     if (s_local_mode != 0u)
     {
         s_local_mode = 0u;
@@ -607,14 +638,14 @@ static void u2_handle_byte(uint8_t b)
         }
     }
 
-    /* ③ 前缀字节本身：只置位，不进解析器 */
+    /* (3) the prefix byte itself: only sets the flag, never goes to the parser */
     if (b == (uint8_t)U2_LOCAL_PREFIX)
     {
         s_local_mode = 1u;
         return;
     }
 
-    /* ④ 喂给 firmware_core 的协议解析器（与最终固件用的是同一份代码） */
+    /* (4) feed the firmware_core protocol parser (the same code the final firmware uses) */
     if (proto_feed(&s_parser, b, &s_msg) == 1)
     {
         u2_on_message(&s_msg);
@@ -622,7 +653,7 @@ static void u2_handle_byte(uint8_t b)
 }
 
 /* ===========================================================================
- * 主入口
+ * Main entry point
  * =========================================================================== */
 
 void usart2_bench_run(void)
@@ -643,20 +674,20 @@ void usart2_bench_run(void)
     {
         uint8_t b;
 
-        /* ---- 收：把队列排干 ---- */
+        /* ---- RX: drain the queue ---- */
         while (u2_pop(&b) == 1)
         {
             u2_handle_byte(b);
         }
 
-        /* ---- 心跳：证明 STM32 -> 树莓派 方向 ---- */
+        /* ---- heartbeat: proves the STM32 -> Raspberry Pi direction ---- */
         if (s_hb_on != 0u && (int32_t)(HAL_GetTick() - t_hb) >= 0)
         {
             t_hb += HB_PERIOD_MS;
             u2_heartbeat();
         }
 
-        /* ---- 周期统计：打在 COM9 和树莓派两边 ---- */
+        /* ---- periodic status: printed on both COM9 and the Raspberry Pi ---- */
         if ((int32_t)(HAL_GetTick() - t_stat) >= 0)
         {
             t_stat += STAT_PERIOD_MS;

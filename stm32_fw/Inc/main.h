@@ -1,12 +1,13 @@
 /**
   ******************************************************************************
   * @file    inc/main.h
-  * @brief   Header for main.c module — OmniNav STM32（正点原子精英板）
+  * @brief   Header for main.c module - OmniNav STM32 (ALIENTEK Elite board)
   *
-  *  ★ 与 ST 官方 STM3210E_EVAL 模板的差异：删掉了
+  *  NOTE: Difference from ST's STM3210E_EVAL template: removed
   *      #include "stm3210e_eval.h"
-  *    那是 ST 评估板的板级驱动（LCD/SRAM/NOR/NAND/CS43L22…），
-  *    正点原子精英板上没有，留着会把一堆无关 BSP 头拖进编译。
+  *    That is the board-level driver for ST's evaluation board
+  *    (LCD/SRAM/NOR/NAND/CS43L22...), which the ALIENTEK Elite board does not
+  *    have; keeping it would drag a pile of unrelated BSP headers into the build.
   ******************************************************************************
   */
 

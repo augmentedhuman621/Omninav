@@ -1,7 +1,7 @@
-# 仿真实测参数（与真实硬件解耦）
-# planar_move 插件参数已在 urdf 内固定；本文件留给 Nav2 / 控制器调参阶段使用。
+# Simulation measurement parameters (decoupled from the real hardware)
+# The planar_move plugin parameters are fixed inside the urdf; this file is kept for the Nav2 / controller tuning stage.
 omninav_sim:
-  # 麦轮几何（来自 CAD 实测，TODO 实物复测）
+  # Mecanum geometry (measured from CAD, TODO re-measure on the real robot)
   wheel_radius_m: 0.0400
   wheel_width_m: 0.0410
   wheelbase_m: 0.200

@@ -1,26 +1,34 @@
 /**
   ******************************************************************************
   * @file    Src/app_single_wheel.c
-  * @brief   A-02 最小单轮安全固件：首次让一个轮子安全、可控地转起来的最小代码集
+  * @brief   A-02 minimum safe single-wheel firmware: the smallest code set that
+  *          first makes one wheel spin safely and under control
   *
-  *  安全行为（task-5 硬要求，缺一不可）：
-  *    1) 上电默认禁能：STBY=0、PWM=0、IN1=IN2=0（高阻滑行，轮子不转）
-  *    2) 输出限幅：占空比上限 OMNINAV_APP_DUTY_MAX（默认 50%），按键步进 5%
-  *    3) 超时停车：RUNNING 状态下超过 OMNINAV_CMD_TIMEOUT_MS（默认 200 ms）
-  *       没有收到任何有效命令 -> 立即撤输出回 DISABLED，并打印
-  *       “最后有效命令 -> 撤输出”的实测时间差（供 A-05 钉死阈值）
-  *    4) 单轮调试入口：USART1（电脑调试口）单字符命令，选轮/方向/占空比/停
-  *       ★ 不新增任何冻结协议帧；冻结的 USART2 协议口（PA2/PA3）完全不碰
-  *    5) 20 ms 控制周期骨架 app_tick_20ms()，与方案 A-3 的 20 ms 速度环对齐
+  *  Safety behaviour (task-5 hard requirements, all mandatory):
+  *    1) Disabled by default at boot: STBY=0, PWM=0, IN1=IN2=0 (high-Z coast, wheel
+  *       does not turn)
+  *    2) Output limiting: duty cap OMNINAV_APP_DUTY_MAX (default 50%), key step 5%
+  *    3) Timeout stop: in RUNNING, if no valid command arrives within
+  *       OMNINAV_CMD_TIMEOUT_MS (default 200 ms) -> revoke output immediately, return
+  *       to DISABLED, and print the measured "last valid command -> revoke" delta (so
+  *       A-05 can pin the threshold down)
+  *    4) Single-wheel debug entry: single-character commands on USART1 (PC debug
+  *       port) to select wheel / direction / duty / stop
+  *       No new frozen protocol frame is added; the frozen USART2 protocol port
+  *       (PA2/PA3) is not touched at all
+  *    5) 20 ms control period skeleton app_tick_20ms(), aligned with the 20 ms speed
+  *       loop of plan A-3
   *
-  *  ★ 与 bench.c 阶段 C 的关系：bench.c 是已验收基线（USART2 11/11），
-  *    本文件是独立实现、一行都不改 bench.c / usart2_bench.c / core_selftest.c；
-  *    电机初始化顺序与 bench.c 阶段 C 保持一致（该顺序已在真机跑通），
-  *    并展开为 4 路 PWM + 8 根方向脚（同一时刻只驱动选中的 1 个轮子）。
+  *  Relationship to bench.c stage C: bench.c is the accepted baseline (USART2
+  *  11/11); this file is an independent implementation and changes not one line of
+  *  bench.c / usart2_bench.c / core_selftest.c. The motor init sequence matches
+  *  bench.c stage C (that sequence is proven on real hardware) and is expanded to
+  *  4 PWM channels + 8 direction pins (only the selected wheel is driven at a time).
   *
-  *  ★ 最小停止路径（首次非零输出前必须满足）：
-  *      DISABLED(STBY=0) 是上电默认态；超时 / 's' / 任何异常都回 DISABLED，
-  *      且必须显式按 'g' 才能重新使能（锁存语义，防“抖动反复使能”）。
+  *  Minimum stop path (must hold before the first non-zero output):
+  *      DISABLED (STBY=0) is the power-up default; timeout / 's' / any fault returns
+  *      to DISABLED, and an explicit 'g' is required to re-enable (latched
+  *      semantics, prevents "chatter re-enables it").
   ******************************************************************************
   */
 
@@ -32,20 +40,20 @@
 
 /* Private defines -----------------------------------------------------------*/
 #ifndef OMNINAV_CMD_TIMEOUT_MS
-#define OMNINAV_CMD_TIMEOUT_MS 200u     /* task-5 裁定默认 200；A-05 实测后可调 150-250 */
+#define OMNINAV_CMD_TIMEOUT_MS 200u     /* task-5 interim default 200; A-05 may tune 150-250 after measuring */
 #endif
 #ifndef OMNINAV_APP_DUTY_MAX
-#define OMNINAV_APP_DUTY_MAX 50u        /* 输出限幅：默认 50%（宏可调，A-02 先保守） */
+#define OMNINAV_APP_DUTY_MAX 50u        /* output limit: 50% by default (macro adjustable, A-02 starts conservative) */
 #endif
 
 #define APP_VERSION          "v0.1"
-#define APP_DUTY_STEP        5u         /* 按键占空比步进 5% */
-#define APP_CTRL_PERIOD_MS   20u        /* 20 ms 调度骨架 */
-#define APP_STATUS_MS        500u       /* 周期状态打印 */
-#define APP_PWM_ARR          3599u      /* 72MHz/(0+1)/(3599+1) = 20.000 kHz，同 bench.c */
-#define APP_DIR_SETTLE_MS    5u         /* 换向死区：PWM=0 后至少 5 ms 才允许再给输出 */
+#define APP_DUTY_STEP        5u         /* key duty step 5% */
+#define APP_CTRL_PERIOD_MS   20u        /* 20 ms scheduling skeleton */
+#define APP_STATUS_MS        500u       /* periodic status print */
+#define APP_PWM_ARR          3599u      /* 72MHz/(0+1)/(3599+1) = 20.000 kHz, same as bench.c */
+#define APP_DIR_SETTLE_MS    5u         /* direction dead-time: output only after 5 ms of PWM=0 */
 
-/* 方向脚与 PWM 脚（06 §5.1.1 TFT_LCD 丝印表；永远认丝印不数孔号） */
+/* Direction pins and PWM pins (06 section 5.1.1 TFT_LCD silkscreen table; always trust the silkscreen, never count holes) */
 #define APP_DIR_PINS_E      ((uint16_t)(GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_10 | GPIO_PIN_12))
 #define APP_DIR_PINS_D      ((uint16_t)(GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_8 | GPIO_PIN_9))
 #define APP_PWM_PINS_E      ((uint16_t)(GPIO_PIN_9 | GPIO_PIN_11 | GPIO_PIN_13 | GPIO_PIN_14))
@@ -54,23 +62,23 @@
 /* Private types -------------------------------------------------------------*/
 typedef struct
 {
-  GPIO_TypeDef *port;    /* 方向脚所在端口 */
+  GPIO_TypeDef *port;    /* port the direction pins live on */
   uint16_t      in1;     /* AIN1 / BIN1 */
   uint16_t      in2;     /* AIN2 / BIN2 */
-  uint32_t      ch;      /* TIM1 通道 */
-  const char   *name;    /* 丝印 M1..M4 */
+  uint32_t      ch;      /* TIM1 channel */
+  const char   *name;    /* silkscreen M1..M4 */
 } app_wheel_t;
 
 typedef enum
 {
-  APP_ST_DISABLED = 0,   /* STBY=0 / PWM=0 / IN=0：高阻滑行，上电默认态 */
-  APP_ST_ARMED    = 1,   /* STBY=1 / PWM=0：短路制动，等心跳 */
-  APP_ST_RUNNING  = 2    /* STBY=1 / PWM=duty：受心跳监管，超时即撤输出 */
+  APP_ST_DISABLED = 0,   /* STBY=0 / PWM=0 / IN=0: high-Z coast, power-up default */
+  APP_ST_ARMED    = 1,   /* STBY=1 / PWM=0: short brake, waiting for heartbeat */
+  APP_ST_RUNNING  = 2    /* STBY=1 / PWM=duty: supervised by heartbeat, revoked on timeout */
 } app_state_t;
 
 /* Private variables ---------------------------------------------------------*/
 /*
- * 轮序 = M1..M4；引脚与 06 §5.1.1 TFT_LCD 丝印表一致：
+ * Wheel order = M1..M4; pins follow the 06 section 5.1.1 TFT_LCD silkscreen table:
  *   M1: PWM PE9 (D6)   AIN1 PE7 (D4)  AIN2 PE8 (D5)
  *   M2: PWM PE11(D8)   BIN1 PE10(D7)  BIN2 PE12(D9)
  *   M3: PWM PE13(D10)  AIN1 PD0 (D2)  AIN2 PD1 (D3)
@@ -86,16 +94,16 @@ static const app_wheel_t k_wheel[4] =
 
 static TIM_HandleTypeDef htim1_app;
 
-static app_state_t g_state;              /* 当前安全状态 */
+static app_state_t g_state;              /* current safety state */
 static uint8_t     g_wheel;              /* 0..3 = M1..M4 */
 static uint8_t     g_fwd;                /* 1 = FWD, 0 = REV */
 static uint8_t     g_duty;               /* 0..OMNINAV_APP_DUTY_MAX (%) */
-static uint32_t    g_last_cmd_tick;      /* 最后一条有效命令的 HAL tick */
-static char        g_last_cmd;           /* 最后一条有效命令字符 */
-static uint32_t    g_dir_block_until;    /* 换向死区：此刻之前不允许给输出 */
-static uint32_t    g_last_revoke_ms;     /* 最近一次“撤输出”实测延迟：最后有效命令 -> 撤 */
+static uint32_t    g_last_cmd_tick;      /* HAL tick of the last valid command */
+static char        g_last_cmd;           /* last valid command character */
+static uint32_t    g_dir_block_until;    /* direction dead-time: no output before this tick */
+static uint32_t    g_last_revoke_ms;     /* measured latency of the last revoke: last valid cmd -> revoke */
 
-/* 外部符号：main.c 提供 */
+/* External symbols: provided by main.c */
 extern UART_HandleTypeDef huart1;
 extern void uart_printf(const char *fmt, ...);
 
@@ -116,7 +124,7 @@ static void app_handle_cmd(char c);
 static void app_tick_20ms(uint32_t now);
 
 /* ==========================================================================
- *  打印层（全部走 main.c 的 uart_printf；不用标准 printf、不用 %f）
+ *  Print layer (everything goes through main.c's uart_printf; no stdio, no %f)
  * ========================================================================== */
 
 static const char *app_state_name(void)
@@ -179,7 +187,7 @@ static void app_print_status(void)
 }
 
 /* ==========================================================================
- *  输出层：只允许“先 PWM=0，再改方向，最后给占空比”的顺序
+ *  Output layer: the only allowed order is "PWM=0 first, then change direction, then apply duty"
  * ========================================================================== */
 
 static void app_pwm_all(uint32_t ccr)
@@ -196,7 +204,7 @@ static void app_dir_all_off(void)
   HAL_GPIO_WritePin(GPIOD, APP_DIR_PINS_D, GPIO_PIN_RESET);
 }
 
-/* 安全态：STBY=0 -> TB6612 全桥高阻（滑行，不制动），PWM=0、IN=0 */
+/* Safe state: STBY=0 -> TB6612 full bridge high-Z (coast, not brake), PWM=0, IN=0 */
 static void app_output_disabled(void)
 {
   app_pwm_all(0u);
@@ -204,7 +212,7 @@ static void app_output_disabled(void)
   HAL_GPIO_WritePin(GPIOE, APP_STBY_PIN, GPIO_PIN_RESET);
 }
 
-/* 待命态：STBY=1 + PWM=0 -> 短路制动（刹车），但轮子不会被推动着转 */
+/* Armed state: STBY=1 + PWM=0 -> short-circuit brake (braking), the wheel cannot be pushed into turning */
 static void app_output_armed(void)
 {
   app_pwm_all(0u);
@@ -212,7 +220,7 @@ static void app_output_armed(void)
   HAL_GPIO_WritePin(GPIOE, APP_STBY_PIN, GPIO_PIN_SET);
 }
 
-/* 运行态：仅选中轮给方向 + 占空比，其余三轮强制 0 */
+/* Running state: only the selected wheel gets direction + duty, the other three are forced to 0 */
 static void app_output_running(void)
 {
   const app_wheel_t *w;
@@ -221,7 +229,7 @@ static void app_output_running(void)
   w   = &k_wheel[g_wheel];
   ccr = ((uint32_t)g_duty * (APP_PWM_ARR + 1u)) / 100u;
 
-  app_pwm_all(0u);        /* 换向/启动死区：先撤 PWM */
+  app_pwm_all(0u);        /* direction/start dead-time: drop PWM first */
   app_dir_all_off();
   if (g_fwd != 0u)
   {
@@ -236,7 +244,7 @@ static void app_output_running(void)
 }
 
 /* ==========================================================================
- *  初始化（顺序与 bench.c 阶段 C 一致；真机已验证过该顺序）
+ *  Init (same order as bench.c stage C; that order is proven on real hardware)
  * ========================================================================== */
 
 static void app_init(void)
@@ -254,27 +262,27 @@ static void app_init(void)
   g_dir_block_until = 0u;
   g_last_revoke_ms  = 0u;
 
-  /* AFIO 时钟必须先开，重映射寄存器才写得进去 */
+  /* The AFIO clock must be enabled first, or the remap register cannot be written */
   __HAL_RCC_AFIO_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_TIM1_CLK_ENABLE();
 
-  /* TIM1 完全重映射：CH1=PE9 CH2=PE11 CH3=PE13 CH4=PE14 */
+  /* TIM1 full remap: CH1=PE9 CH2=PE11 CH3=PE13 CH4=PE14 */
   __HAL_AFIO_REMAP_TIM1_ENABLE();
 
-  /* 先把方向脚 + STBY 写成低，再配成输出：避免上电瞬间误动 */
+  /* Write the direction pins + STBY low first, then configure them as outputs: avoids a glitch at power-up */
   HAL_GPIO_WritePin(GPIOE, (uint16_t)(APP_DIR_PINS_E | APP_STBY_PIN), GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOD, APP_DIR_PINS_D, GPIO_PIN_RESET);
 
-  /* PWM 四脚：复用推挽 */
+  /* Four PWM pins: alternate-function push-pull */
   g.Pin   = APP_PWM_PINS_E;
   g.Mode  = GPIO_MODE_AF_PP;
   g.Pull  = GPIO_NOPULL;
   g.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOE, &g);
 
-  /* 方向 8 脚 + STBY(PE15)：普通推挽输出 */
+  /* Eight direction pins + STBY(PE15): plain push-pull outputs */
   g.Mode  = GPIO_MODE_OUTPUT_PP;
   g.Speed = GPIO_SPEED_FREQ_LOW;
   g.Pin   = (uint16_t)(APP_DIR_PINS_E | APP_STBY_PIN);
@@ -307,25 +315,27 @@ static void app_init(void)
   mc.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
   (void)HAL_TIMEx_MasterConfigSynchronization(&htim1_app, &mc);
 
-  /* ★ 配置完必须显式 Start，否则 GPIO 上永远没有波形（06 §10-15 的坑） */
+  /* Must be started explicitly after configuration, otherwise there is never a
+   * waveform on the GPIO (pitfall from 06 section 10-15) */
   (void)HAL_TIM_PWM_Start(&htim1_app, TIM_CHANNEL_1);
   (void)HAL_TIM_PWM_Start(&htim1_app, TIM_CHANNEL_2);
   (void)HAL_TIM_PWM_Start(&htim1_app, TIM_CHANNEL_3);
   (void)HAL_TIM_PWM_Start(&htim1_app, TIM_CHANNEL_4);
 
-  /* 显式回安全态：STBY=0 / PWM=0 / IN=0 */
+  /* Explicitly return to the safe state: STBY=0 / PWM=0 / IN=0 */
   app_output_disabled();
 }
 
 /* ==========================================================================
- *  USART1 非阻塞收字节（轮询，不占中断向量；与 bench.c 的 uart_getc 同法）
+ *  USART1 non-blocking byte receive (polled, no interrupt vector; same approach
+ *  as uart_getc in bench.c)
  * ========================================================================== */
 
 static int app_getc(char *c)
 {
   volatile uint32_t tmp;
 
-  /* 溢出错误要先清掉，否则 RXNE 再也不置位 */
+  /* Clear an overrun error first, otherwise RXNE never gets set again */
   if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE) != RESET)
   {
     tmp = huart1.Instance->SR;
@@ -343,7 +353,7 @@ static int app_getc(char *c)
 }
 
 /* ==========================================================================
- *  状态机
+ *  State machine
  * ========================================================================== */
 
 static void app_revoke_timeout(uint32_t now)
@@ -374,7 +384,7 @@ static void app_tick_20ms(uint32_t now)
   switch (g_state)
   {
     case APP_ST_DISABLED:
-      /* 每 20 ms 强制一次安全态，防止任何意外残留输出 */
+      /* Force the safe state every 20 ms so no stray output can survive */
       app_output_disabled();
       break;
 
@@ -382,15 +392,15 @@ static void app_tick_20ms(uint32_t now)
       app_output_armed();
       if (g_duty == 0u)
       {
-        break;                                  /* 占空比 0：不启动 */
+        break;                                  /* duty 0: do not start */
       }
       if (age >= OMNINAV_CMD_TIMEOUT_MS)
       {
-        break;                                  /* 心跳不新：不启动 */
+        break;                                  /* heartbeat stale: do not start */
       }
       if ((int32_t)(now - g_dir_block_until) < 0)
       {
-        break;                                  /* 换向死区未到：不启动 */
+        break;                                  /* direction dead-time not elapsed: do not start */
       }
       g_state = APP_ST_RUNNING;
       app_output_running();
@@ -422,7 +432,7 @@ static void app_tick_20ms(uint32_t now)
 }
 
 /* ==========================================================================
- *  命令处理（USART1 单字符；不新增任何协议帧）
+ *  Command handling (single characters on USART1; no protocol frame is added)
  * ========================================================================== */
 
 static void app_handle_cmd(char c)
@@ -468,7 +478,7 @@ static void app_handle_cmd(char c)
         app_output_armed();
       }
       g_fwd             = (c == 'f') ? 1u : 0u;
-      g_duty            = 0u;   /* 换向必须 PWM 归零；占空比也清零防“按一下就飞” */
+      g_duty            = 0u;   /* changing direction must zero PWM; duty is zeroed too so it cannot jump */
       g_dir_block_until = now + APP_DIR_SETTLE_MS;
       uart_printf("[A02] dir -> %s, duty=0%%, %lu ms dead-time after PWM=0\r\n",
                   (g_fwd != 0u) ? "FWD" : "REV",
@@ -514,7 +524,7 @@ static void app_handle_cmd(char c)
       break;
 
     case 'k':
-      /* 心跳：只刷新时间戳；是否维持 RUNNING 由 20 ms tick 决定 */
+      /* Heartbeat: only refreshes the timestamp; the 20 ms tick decides whether RUNNING survives */
       break;
 
     case 'b':
@@ -549,7 +559,7 @@ static void app_handle_cmd(char c)
 }
 
 /* ==========================================================================
- *  入口：初始化 -> banner -> 主循环（收命令 + 20 ms tick + 周期状态）
+ *  Entry: init -> banner -> main loop (commands + 20 ms tick + periodic status)
  * ========================================================================== */
 
 void app_single_wheel_run(void)
@@ -579,7 +589,7 @@ void app_single_wheel_run(void)
       t_ctrl += APP_CTRL_PERIOD_MS;
       if ((now - t_ctrl) > (APP_CTRL_PERIOD_MS * 10u))
       {
-        t_ctrl = now;   /* 防长阻塞后“补 tick 风暴” */
+        t_ctrl = now;   /* avoid a "catch-up tick storm" after a long block */
       }
       app_tick_20ms(now);
     }
@@ -594,18 +604,18 @@ void app_single_wheel_run(void)
 }
 
 /* ==========================================================================
- *  附：命令/状态一览（与实现同步维护，改代码时一起改）
+ *  Appendix: command/state overview (keep in sync with the implementation)
  *
- *  命令        作用
- *  1..4        选轮 M1..M4（占空比归 0，RUNNING 时先回 ARMED）
- *  f / r       方向 FWD / REV（PWM 先归 0 + 5 ms 死区，占空比归 0）
- *  + / -       占空比 ±5%，范围 0..OMNINAV_APP_DUTY_MAX
- *  g           使能（STBY=1，PWM=0 制动待命）
- *  k           心跳；RUNNING 下必须每 <= 200 ms 至少一条有效命令
- *  b           刹车（STBY=1，PWM=0，短路制动）
- *  s           停止 -> DISABLED（STBY=0，PWM=0，高阻滑行）
- *  p / ?       打印状态 / 帮助
+ *  command      action
+ *  1..4        select wheel M1..M4 (duty reset to 0; when RUNNING, drop to ARMED first)
+ *  f / r       direction FWD / REV (PWM to 0 first + 5 ms dead-time, duty reset to 0)
+ *  + / -       duty +/-5%, range 0..OMNINAV_APP_DUTY_MAX
+ *  g           arm (STBY=1, PWM=0 brake, standing by)
+ *  k           heartbeat; while RUNNING at least one valid command every <= 200 ms
+ *  b           brake (STBY=1, PWM=0, short-circuit brake)
+ *  s           stop -> DISABLED (STBY=0, PWM=0, high-Z coast)
+ *  p / ?       print status / help
  *
- *  状态机：DISABLED --g--> ARMED --duty>0 且心跳新鲜--> RUNNING
- *          RUNNING --超时--> DISABLED（锁存，需 'g' 重新使能）
+ *  State machine: DISABLED --g--> ARMED --duty>0 and heartbeat fresh--> RUNNING
+ *                 RUNNING --timeout--> DISABLED (latched, needs 'g' to re-enable)
  * ========================================================================== */

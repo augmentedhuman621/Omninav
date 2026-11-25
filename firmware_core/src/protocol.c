@@ -1,22 +1,22 @@
 /*
- * protocol.c — 串口收包状态机实现
+ * protocol.c -- serial receive state machine implementation
  *
- * 纯整数、零依赖：本文件只 include "protocol.h"（后者只 include <stdint.h>）。
- * 无动态内存、无全局可变状态、无递归、无浮点。
+ * Integer-only, zero dependencies: this file only includes "protocol.h" (which only includes <stdint.h>).
+ * No dynamic memory, no global mutable state, no recursion, no floating point.
  *
- * 容错策略的完整说明见 protocol.h 文件头。
+ * See the protocol.h file header for the full fault-tolerance policy.
  */
 
 #include "protocol.h"
 
 /* ------------------------------------------------------------------ */
-/* 内部类型与工具                                                      */
+/* Internal types and helpers                                         */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
     int32_t value;
-    uint8_t ok;    /* 1 = 是合法十进制整数 */
-    uint8_t range; /* 1 = 超出 int32 范围，已饱和 */
+    uint8_t ok;    /* 1 = valid decimal integer */
+    uint8_t range; /* 1 = out of int32 range, saturated */
 } proto_num_t;
 
 static int proto_is_digit(char c)
@@ -38,9 +38,9 @@ static char proto_lower(char c)
 }
 
 /*
- * 解析一个十进制整数（已经是「一个字段」的字节区间，不含逗号）。
- * 只接受可选 '-' 加至少一位数字。超范围时饱和到 int32 的边界并置 range。
- * 不用 strtol（那要 <stdlib.h>，且算法层不许引第三方/标准库解析函数）。
+ * Parse one decimal integer (the byte range of one field, no comma).
+ * Accepts an optional '-' plus at least one digit; out of range saturates to the
+ * int32 bound and sets range. No strtol (needs <stdlib.h>; the algorithm layer forbids it).
  */
 static proto_num_t proto_parse_i32(const char *s, uint16_t n)
 {
@@ -65,14 +65,14 @@ static proto_num_t proto_parse_i32(const char *s, uint16_t n)
     for (; i < n; ++i) {
         int64_t next;
         if (proto_is_digit(s[i]) == 0) {
-            return r; /* ok 保持 0 */
+            return r; /* ok stays 0 */
         }
         any = 1;
         next = acc * 10 + (int64_t)(s[i] - '0');
         if (next > 2147483648LL) {
-            /* 夹在 2^31 上，并记下「确实超出了」——
-               只有这样才能区分「-2147483648 这个恰好合法的值」和
-               「-99999999999999 这种真溢出」。 */
+            /* Saturate at 2^31 and remember that it really overflowed -- this is
+               the only way to tell the just-legal value -2147483648 apart from
+               a genuine overflow like -99999999999999. */
             next    = 2147483648LL;
             clamped = 1;
         }
@@ -86,7 +86,7 @@ static proto_num_t proto_parse_i32(const char *s, uint16_t n)
             r.range = (uint8_t)1;
             r.value = INT32_MIN;
         } else {
-            r.value = (int32_t)(-acc); /* acc <= 2^31，取负安全 */
+            r.value = (int32_t)(-acc); /* acc <= 2^31, negation is safe */
         }
     } else {
         if (acc > 2147483647LL) {
@@ -134,7 +134,7 @@ void proto_init(proto_parser_t *p)
 }
 
 /* ------------------------------------------------------------------ */
-/* 一行 <- 一条报文                                                    */
+/* One line <- one message                                            */
 /* ------------------------------------------------------------------ */
 
 static void proto_parse_line(const char *buf, uint16_t n, proto_msg_t *msg)
@@ -149,11 +149,11 @@ static void proto_parse_line(const char *buf, uint16_t n, proto_msg_t *msg)
 
     proto_msg_init(msg);
 
-    /* 1) 原文存档 + 非法字符扫描（可打印 ASCII 之外一律算非法字节）
-     *    ★ 制表符例外：它是被显式允许的分隔空白（见 proto_is_space）。
-     *      反过来，只有 ' ' 和 '\t' 算空白；0x0B / 0x0C / 0x85 / 0xA0
-     *      这些恰恰是「波特率不对」的症状，必须留下来报错，不能当空白剥掉
-     *      —— 所以这里绝不能按「广义控制字符 = 空白」来放行。 */
+    /* 1) Archive the raw bytes + illegal-char scan (anything outside printable
+     *    ASCII is illegal). Tab is the one exception: an explicitly allowed
+     *      separator space (see proto_is_space). Only ' ' and '\t' count as space;
+     *      0x0B / 0x0C / 0x85 / 0xA0 are the very symptoms of a wrong baud rate, so
+     *      they must be reported, never stripped -- never treat control chars as space. */
     for (i = (uint16_t)0; i < n; ++i) {
         uint8_t c = (uint8_t)buf[i];
         msg->raw[i] = buf[i];
@@ -164,7 +164,7 @@ static void proto_parse_line(const char *buf, uint16_t n, proto_msg_t *msg)
     msg->raw[n] = '\0';
     msg->raw_len = (uint8_t)n;
 
-    /* 2) 去掉首尾空白 */
+    /* 2) Trim leading and trailing whitespace */
     b = (uint16_t)0;
     e = n;
     while (b < e && proto_is_space(buf[b]) != 0) {
@@ -175,10 +175,10 @@ static void proto_parse_line(const char *buf, uint16_t n, proto_msg_t *msg)
     }
     if (b >= e) {
         msg->error = err;
-        return; /* cmd 保持 NONE：纯空白行，调用者会忽略 */
+        return; /* cmd stays NONE: blank line, caller ignores it */
     }
 
-    /* 3) 命令字 */
+    /* 3) Command word */
     switch (proto_lower(buf[b])) {
     case 'v': cmd = PROTO_CMD_V; break;
     case 'm': cmd = PROTO_CMD_M; break;
@@ -189,7 +189,7 @@ static void proto_parse_line(const char *buf, uint16_t n, proto_msg_t *msg)
     }
     p = (uint16_t)(b + 1);
 
-    /* 4) 命令字之后：核对剩余部分 */
+    /* 4) After the command word: verify the rest */
     if (cmd == PROTO_CMD_RESET) {
         if ((uint16_t)(e - p) != (uint16_t)4) {
             cmd = PROTO_CMD_UNKNOWN;
@@ -211,17 +211,17 @@ static void proto_parse_line(const char *buf, uint16_t n, proto_msg_t *msg)
         }
     } else if (cmd == PROTO_CMD_S) {
         if (p != e) {
-            cmd = PROTO_CMD_UNKNOWN; /* S 之后必须直接是行尾 */
+            cmd = PROTO_CMD_UNKNOWN; /* end of line must follow S directly */
         }
     } else if (cmd == PROTO_CMD_V || cmd == PROTO_CMD_M || cmd == PROTO_CMD_P) {
         if (p >= e || buf[p] != ',') {
-            cmd = PROTO_CMD_UNKNOWN; /* 命令字后面缺逗号 */
+            cmd = PROTO_CMD_UNKNOWN; /* missing comma after the command word */
         } else {
             p = (uint16_t)(p + 1);
         }
     }
 
-    /* 5) 逐字段解析（只有 V / M / P 有字段） */
+    /* 5) Parse field by field (only V / M / P carry fields) */
     if (cmd == PROTO_CMD_V || cmd == PROTO_CMD_M || cmd == PROTO_CMD_P) {
         for (;;) {
             uint16_t fs = p;
@@ -250,7 +250,7 @@ static void proto_parse_line(const char *buf, uint16_t n, proto_msg_t *msg)
         }
     }
 
-    /* 6) 参数个数核对 + 未知命令 */
+    /* 6) Argument-count check + unknown command */
     {
         int want = -1;
         switch (cmd) {
@@ -275,7 +275,7 @@ static void proto_parse_line(const char *buf, uint16_t n, proto_msg_t *msg)
 }
 
 /* ------------------------------------------------------------------ */
-/* 逐字节喂入                                                          */
+/* Byte-by-byte feed                                                  */
 /* ------------------------------------------------------------------ */
 
 int proto_feed(proto_parser_t *p, uint8_t byte, proto_msg_t *out)
@@ -284,7 +284,7 @@ int proto_feed(proto_parser_t *p, uint8_t byte, proto_msg_t *out)
         return 0;
     }
 
-    /* 丢弃模式：一路丢到换行为止（超长行的唯一正确收尾方式） */
+    /* Discard mode: drop everything until a newline (the only correct way to end an overlong line) */
     if (p->discarding != (uint8_t)0) {
         if (byte == (uint8_t)'\n') {
             p->discarding = (uint8_t)0;
@@ -304,7 +304,7 @@ int proto_feed(proto_parser_t *p, uint8_t byte, proto_msg_t *out)
         proto_parse_line(p->buf, n, &tmp);
         if (tmp.cmd == PROTO_CMD_NONE && tmp.error == (uint16_t)0) {
             p->stat_empty++;
-            return 0; /* 纯空白行 */
+            return 0; /* blank line */
         }
         if ((tmp.error & PROTO_ERR_BAD_CHAR) != (uint16_t)0) {
             p->stat_bad++;
@@ -317,12 +317,12 @@ int proto_feed(proto_parser_t *p, uint8_t byte, proto_msg_t *out)
     }
 
     if (byte == (uint8_t)'\r') {
-        return 0; /* 兼容 CRLF */
+        return 0; /* tolerate CRLF */
     }
 
     if (p->len >= (uint16_t)(PROTO_LINE_MAX - 1)) {
-        /* 本行已经太长：作废，进入丢弃模式，并且必须一直丢到换行，
-           否则这一行的尾巴会被当下一条报文的开头 —— 那才是最坏的情况。 */
+        /* Line already too long: void it, enter discard mode, and keep discarding
+           until a newline -- otherwise this line's tail would lead the next message: worst case. */
         p->stat_overflow++;
         p->discarding = (uint8_t)1;
         p->len        = (uint16_t)0;

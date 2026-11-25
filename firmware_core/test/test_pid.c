@@ -1,20 +1,20 @@
 /*
- * test_pid.c — pid 模块的测试台
+ * test_pid.c - test bench for the pid module
  *
- * 覆盖：
- *   [1] 阶跃响应（一阶惯性对象上的闭环收敛）
- *   [2] 输出限幅（任何输入下 |out| <= out_max）
- *   [3] ★ 抗积分饱和：对比「有抗饱和」与「朴素 PI」的退饱和时间
- *   [4] 积分分离（大偏差阶段不许积分）
- *   [5] 微分作用在测量值上（无微分尖峰）
- *   [6] 复位语义
- *   [7] 参数校验与非法输入
- *   [8] 空指针安全
- *   [9] 确定性（同输入序列 -> 同输出序列，逐位一致）
- *   [10] 饱和标志位
+ * Coverage:
+ *   [1] Step response (closed-loop convergence on a first-order inertial plant)
+ *   [2] Output limiting (|out| <= out_max for any input)
+ *   [3] ★ Anti-windup: desaturation time, with anti-windup vs naive PI
+ *   [4] Integral separation (no integration during a large-error phase)
+ *   [5] Derivative on measurement (no derivative kick)
+ *   [6] Reset semantics
+ *   [7] Gain validation and invalid input
+ *   [8] Null-pointer safety
+ *   [9] Determinism (same input sequence -> same output sequence, bit for bit)
+ *   [10] Saturation flag
  *
- * 说明：本文件是测试，允许用 printf / 整数对象模型。src/ 与 include/ 依旧
- *       零浮点、零第三方依赖（make check-purity 会检查）。
+ * Note: this is a test file, so printf / the integer plant model are allowed. src/ and include/
+ *       remain float-free and third-party-dependency-free (make check-purity checks this).
  */
 
 #include <stdio.h>
@@ -52,9 +52,9 @@ static void ck_eq32(const char *tag, int32_t got, int32_t want)
     }
 }
 
-/* 一阶惯性对象：v[k+1] = v[k] + (gain*u[k] - v[k]) / tau
- * gain = 每个控制量对应的稳态速度（mm/s），tau = 时间常数（步）。
- * 用它而不是「v = u」是为了让闭环真的有动态，才测得出超调与整定。 */
+/* First-order inertial plant: v[k+1] = v[k] + (gain*u[k] - v[k]) / tau
+ * gain = steady-state speed per unit of control (mm/s), tau = time constant (steps).
+ * Using it instead of "v = u" gives the loop real dynamics, so overshoot and settling are measurable. */
 static int32_t plant_step(int32_t u, int32_t v, int32_t gain, int32_t tau)
 {
     int64_t d = ((int64_t)gain * (int64_t)u - (int64_t)v);
@@ -62,7 +62,7 @@ static int32_t plant_step(int32_t u, int32_t v, int32_t gain, int32_t tau)
 }
 
 /* ================================================================== */
-/* [1] 阶跃响应                                                        */
+/* [1] Step response                                                   */
 /* ================================================================== */
 
 static void test_step_response(void)
@@ -76,7 +76,7 @@ static void test_step_response(void)
     int32_t i;
     int settled_at = -1;
 
-    printf("[1] 阶跃响应（kp=0.5 ki=0.02，对象 gain=1 tau=5 步）\n");
+    printf("[1] step response (kp=0.5 ki=0.02, plant gain=1 tau=5 steps)\n");
 
     pid_reset(&st);
     for (i = 0; i < 1000; ++i) {
@@ -93,16 +93,16 @@ static void test_step_response(void)
     }
     final_err = iabs32(sp - v);
 
-    printf("  [info] 峰值 %ld mm/s（超调 %ld‰），稳态误差 %ld mm/s，首次进入 ±3 mm/s 于第 %d 步\n",
+    printf("  [info] peak %ld mm/s (overshoot %ld permille), steady-state error %ld mm/s, first within +/-3 mm/s at step %d\n",
            (long)peak, (long)((peak - sp) * 1000 / sp), (long)final_err, settled_at);
 
-    ck_true("[1] 收敛到设定值（稳态误差 <= 2 mm/s）", final_err <= 2);
-    ck_true("[1] 无大超调（峰值 <= 1.2 倍设定值）", peak <= sp + sp / 5);
-    ck_true("[1] 1000 步内进入 ±3 mm/s", settled_at >= 0);
+    ck_true("[1] converges to the setpoint (steady-state error <= 2 mm/s)", final_err <= 2);
+    ck_true("[1] no large overshoot (peak <= 1.2 x setpoint)", peak <= sp + sp / 5);
+    ck_true("[1] settles within +/-3 mm/s in 1000 steps", settled_at >= 0);
 }
 
 /* ================================================================== */
-/* [2] 输出限幅                                                        */
+/* [2] Output limiting                                                 */
 /* ================================================================== */
 
 static void test_output_limit(void)
@@ -113,7 +113,7 @@ static void test_output_limit(void)
     int32_t i;
     int32_t j;
 
-    printf("[2] 输出限幅\n");
+    printf("[2] output limiting\n");
 
     for (i = 0; i < 7; ++i) {
         pid_reset(&st);
@@ -124,7 +124,7 @@ static void test_output_limit(void)
         }
     }
 
-    /* 非对称限幅也要成立 */
+    /* asymmetric limits must hold too */
     {
         pid_gains_t g2 = pid_default_gains();
         pid_state_t st2;
@@ -134,17 +134,17 @@ static void test_output_limit(void)
         for (i = 0; i < 50; ++i) {
             uint32_t fl = 0u;
             int32_t u = pid_step(&g2, &st2, 5000, 0, &fl);
-            ck_true("[2] 非对称限幅", u == 7);
+            ck_true("[2] asymmetric limiting", u == 7);
         }
     }
 }
 
 /* ================================================================== */
-/* [3] ★ 抗积分饱和                                                    */
+/* [3] ★ Anti-windup                                                   */
 /* ================================================================== */
 
-/* 测试专用的「朴素 PI」参照物：没有积分限幅、没有条件积分。
- * 放在测试里而不是 src/ 里 —— 它只是为了量出差距，不是产品代码。 */
+/* Test-only "naive PI" reference: no integral clamping, no conditional integration.
+ * It lives in the test, not in src/ -- its only job is to measure the gap; it is not product code. */
 static int32_t naive_pi(int32_t sp, int32_t meas, int64_t *integ, int32_t kp_q16,
                         int32_t ki_q16, int32_t lo, int32_t hi)
 {
@@ -171,11 +171,11 @@ static int steps_to_calm(int32_t use_real)
     int32_t found = -1;
 
     g.kp_q16 = PID_Q16_ONE / 2;      /* 0.5  */
-    g.ki_q16 = PID_Q16_ONE / 2;      /* 0.5  —— 故意调大，好让饱和明显 */
+    g.ki_q16 = PID_Q16_ONE / 2;      /* 0.5 -- deliberately large so saturation is clearly visible */
     g.integ_limit = 1000;
     pid_reset(&st);
 
-    /* 相位 1：给一个物理上够不到的指令（对象上限 1000 mm/s），跑 500 步 */
+    /* phase 1: command something physically unreachable (plant ceiling 1000 mm/s) for 500 steps */
     for (i = 0; i < 500; ++i) {
         int32_t u;
         if (use_real != 0) {
@@ -187,7 +187,7 @@ static int steps_to_calm(int32_t use_real)
         v = plant_step(u, v, 1, 5);
     }
 
-    /* 相位 2：指令归零，看多少步之内速度真的降下来 */
+    /* phase 2: drop the command to zero and see in how many steps the speed really falls */
     for (i = 0; i < 3000; ++i) {
         int32_t u;
         if (use_real != 0) {
@@ -215,9 +215,9 @@ static void test_anti_windup(void)
     int32_t naive_steps;
     int64_t bound;
 
-    printf("[3] ★ 抗积分饱和（指令 2000 mm/s，对象上限 1000 mm/s）\n");
+    printf("[3] ★ anti-windup (command 2000 mm/s, plant ceiling 1000 mm/s)\n");
 
-    /* 有抗饱和：积分累加器必须被夹住 */
+    /* with anti-windup the integral accumulator must be clamped */
     g.kp_q16 = PID_Q16_ONE / 2;
     g.ki_q16 = PID_Q16_ONE / 2;
     g.integ_limit = 1000;
@@ -228,22 +228,22 @@ static void test_anti_windup(void)
         v = plant_step(u, v, 1, 5);
     }
     bound = (int64_t)g.integ_limit * PID_Q16_ONE / g.ki_q16;
-    printf("  [info] 积分累加器 = %ld，理论上限 = %ld\n", (long)st.integ_raw, (long)bound);
-    ck_true("[3] 积分累加器被夹在上限内", st.integ_raw <= bound && st.integ_raw >= -bound);
-    ck_true("[3] 饱和期间积分不再增长到天上", st.integ_raw <= bound);
+    printf("  [info] integral accumulator = %ld, theoretical bound = %ld\n", (long)st.integ_raw, (long)bound);
+    ck_true("[3] integral accumulator clamped to the bound", st.integ_raw <= bound && st.integ_raw >= -bound);
+    ck_true("[3] integral does not run away while saturated", st.integ_raw <= bound);
 
     real_steps  = steps_to_calm(1);
     naive_steps = steps_to_calm(0);
-    printf("  [info] 退饱和到 v<=10 mm/s 所需步数：有抗饱和 %d 步，朴素 PI %d 步\n",
+    printf("  [info] steps to desaturate to v<=10 mm/s: with anti-windup %d steps, naive PI %d steps\n",
            real_steps, naive_steps);
 
-    ck_true("[3] 有抗饱和时能在 300 步内退饱和", real_steps >= 0 && real_steps < 300);
-    ck_true("[3] 且不慢于朴素 PI（同参数下应显著更快）",
+    ck_true("[3] with anti-windup it desaturates within 300 steps", real_steps >= 0 && real_steps < 300);
+    ck_true("[3] and no slower than naive PI (should be clearly faster at the same gains)",
             naive_steps < 0 || real_steps <= naive_steps);
 }
 
 /* ================================================================== */
-/* [4] 积分分离                                                        */
+/* [4] Integral separation                                             */
 /* ================================================================== */
 
 static void test_integral_separation(void)
@@ -253,7 +253,7 @@ static void test_integral_separation(void)
     int32_t i;
     int sep_seen = 0;
 
-    printf("[4] 积分分离（阈值 50 mm/s，偏差 1000 mm/s）\n");
+    printf("[4] integral separation (threshold 50 mm/s, error 1000 mm/s)\n");
 
     g.integ_sep_mm_s = 50;
     pid_reset(&st);
@@ -264,21 +264,21 @@ static void test_integral_separation(void)
             sep_seen = 1;
         }
     }
-    ck_true("[4] 大偏差时置 INTEG_SEP 标志", sep_seen != 0);
-    ck_eq32("[4] 分离期间积分累加器保持 0", (int32_t)st.integ_raw, 0);
+    ck_true("[4] INTEG_SEP flag set on a large error", sep_seen != 0);
+    ck_eq32("[4] integral accumulator stays 0 during separation", (int32_t)st.integ_raw, 0);
 
-    /* 偏差回到阈值内后，积分必须恢复 */
+    /* once the error is back under the threshold, integration must resume */
     pid_reset(&st);
     for (i = 0; i < 20; ++i) {
         uint32_t fl = 0u;
         (void)pid_step(&g, &st, 10, 0, &fl);
-        ck_true("[4] 小偏差时不置 INTEG_SEP 标志", (fl & PID_FLAG_INTEG_SEP) == 0u);
+        ck_true("[4] INTEG_SEP flag clear on a small error", (fl & PID_FLAG_INTEG_SEP) == 0u);
     }
-    ck_true("[4] 小偏差时积分正常累加", st.integ_raw > 0);
+    ck_true("[4] integral accumulates normally on a small error", st.integ_raw > 0);
 }
 
 /* ================================================================== */
-/* [5] 微分作用在测量值上                                              */
+/* [5] Derivative on measurement                                       */
 /* ================================================================== */
 
 static void test_derivative(void)
@@ -288,30 +288,30 @@ static void test_derivative(void)
     int32_t u0;
     int32_t u1;
 
-    printf("[5] 微分作用在测量值上（kd = 1.0，ki = 0）\n");
+    printf("[5] derivative on measurement (kd = 1.0, ki = 0)\n");
 
     g.ki_q16 = 0;
     g.kd_q16 = PID_Q16_ONE; /* 1.0 */
     pid_reset(&st);
 
-    /* 第一步：设定值突变 0 -> 100，但反馈还是 0，微分项必须为 0（无尖峰） */
+    /* step 1: setpoint jumps 0 -> 100 while the feedback is still 0, so the derivative term must be 0 (no kick) */
     u0 = pid_step(&g, &st, 100, 0, 0);
-    ck_eq32("[5] 设定值阶跃首步无微分尖峰（应为 0.5*100 = 50）", u0, 50);
+    ck_eq32("[5] no derivative kick on the setpoint step (expected 0.5*100 = 50)", u0, 50);
 
-    /* 第二步：反馈 0 -> 10，微分项 = -1.0*(10-0) = -10
-     *        误差 90 -> P 项 45，合计 35 */
+    /* step 2: feedback 0 -> 10, derivative term = -1.0*(10-0) = -10
+     *         error 90 -> P term 45, total 35 */
     u1 = pid_step(&g, &st, 100, 10, 0);
-    ck_eq32("[5] 反馈上升时微分项反向（应为 45-10 = 35）", u1, 35);
+    ck_eq32("[5] derivative opposes a rising feedback (expected 45-10 = 35)", u1, 35);
 
-    /* 反馈不变则微分项为 0 */
-    ck_eq32("[5] 反馈不变时微分项为 0（应为 45）", pid_step(&g, &st, 100, 10, 0), 45);
+    /* constant feedback means a zero derivative term */
+    ck_eq32("[5] zero derivative term with constant feedback (expected 45)", pid_step(&g, &st, 100, 10, 0), 45);
 
-    /* ki = 0 时积分累加器必须原地不动 */
-    ck_eq32("[5] ki=0 时积分累加器不动", (int32_t)st.integ_raw, 0);
+    /* with ki = 0 the integral accumulator must stay put */
+    ck_eq32("[5] integral accumulator stays at 0 with ki=0", (int32_t)st.integ_raw, 0);
 }
 
 /* ================================================================== */
-/* [6] 复位语义                                                        */
+/* [6] Reset semantics                                                 */
 /* ================================================================== */
 
 static void test_reset(void)
@@ -320,19 +320,19 @@ static void test_reset(void)
     pid_state_t st;
     int32_t i;
 
-    printf("[6] 复位语义\n");
+    printf("[6] reset semantics\n");
 
     pid_reset(&st);
     for (i = 0; i < 10; ++i) {
         (void)pid_step(&g, &st, 100, 0, 0);
     }
-    ck_true("[6] 跑过之后积分非零", st.integ_raw != 0);
+    ck_true("[6] integral is nonzero after a run", st.integ_raw != 0);
     pid_reset(&st);
-    ck_eq32("[6] 复位清积分", (int32_t)st.integ_raw, 0);
-    ck_eq32("[6] 复位清 prev_meas", st.prev_meas, 0);
-    ck_eq32("[6] 复位清 started", (int32_t)st.started, 0);
+    ck_eq32("[6] reset clears the integral", (int32_t)st.integ_raw, 0);
+    ck_eq32("[6] reset clears prev_meas", st.prev_meas, 0);
+    ck_eq32("[6] reset clears started", (int32_t)st.started, 0);
 
-    /* 复位后第一步必须与全新状态的第一位一致（微分项不残留） */
+    /* the first step after reset must match a fresh state (no leftover derivative term) */
     {
         pid_state_t a;
         pid_state_t b;
@@ -344,46 +344,46 @@ static void test_reset(void)
         pid_reset(&b);
         (void)pid_step(&g, &b, 999, 999, 0);
         ub = pid_step(&g, &b, 42, 7, 0);
-        ck_eq32("[6] 复位后首步与全新状态一致", ub, ua);
+        ck_eq32("[6] first step after reset matches a fresh state", ub, ua);
     }
 
-    pid_reset(0); /* 必须不崩 */
-    ck_true("[6] pid_reset(0) 安全", 1);
+    pid_reset(0); /* must not crash */
+    ck_true("[6] pid_reset(0) is safe", 1);
 }
 
 /* ================================================================== */
-/* [7] 参数校验                                                        */
+/* [7] Gain validation                                                 */
 /* ================================================================== */
 
 static void test_validation(void)
 {
     pid_gains_t g = pid_default_gains();
 
-    printf("[7] 参数校验\n");
+    printf("[7] gain validation\n");
 
-    ck_true("[7] 默认参数合法", pid_gains_is_valid(&g) == 1);
+    ck_true("[7] default gains are valid", pid_gains_is_valid(&g) == 1);
 
     g.out_min = 100;
     g.out_max = 100;
-    ck_true("[7] out_min >= out_max 非法", pid_gains_is_valid(&g) == 0);
+    ck_true("[7] out_min >= out_max is invalid", pid_gains_is_valid(&g) == 0);
 
     g = pid_default_gains();
     g.kp_q16 = -1;
-    ck_true("[7] 负增益非法", pid_gains_is_valid(&g) == 0);
+    ck_true("[7] negative gains are invalid", pid_gains_is_valid(&g) == 0);
 
     g = pid_default_gains();
     g.ki_q16 = -1;
-    ck_true("[7] 负 ki 非法", pid_gains_is_valid(&g) == 0);
+    ck_true("[7] negative ki is invalid", pid_gains_is_valid(&g) == 0);
 
     g = pid_default_gains();
     g.kd_q16 = -1;
-    ck_true("[7] 负 kd 非法", pid_gains_is_valid(&g) == 0);
+    ck_true("[7] negative kd is invalid", pid_gains_is_valid(&g) == 0);
 
-    ck_true("[7] NULL 非法", pid_gains_is_valid(0) == 0);
+    ck_true("[7] NULL is invalid", pid_gains_is_valid(0) == 0);
 }
 
 /* ================================================================== */
-/* [8] 空指针安全                                                      */
+/* [8] Null-pointer safety                                             */
 /* ================================================================== */
 
 static void test_null_safety(void)
@@ -391,17 +391,17 @@ static void test_null_safety(void)
     pid_gains_t g = pid_default_gains();
     pid_state_t st;
 
-    printf("[8] 空指针安全\n");
+    printf("[8] null-pointer safety\n");
 
     pid_reset(&st);
-    ck_eq32("[8] g=NULL 返回 0", pid_step(0, &st, 100, 0, 0), 0);
-    ck_eq32("[8] st=NULL 返回 0", pid_step(&g, 0, 100, 0, 0), 0);
-    ck_eq32("[8] flags=NULL 可用", pid_step(&g, &st, 0, 0, 0), 0);
-    ck_true("[8] 上面几步没有破坏状态", st.started == 0 || st.started == 1);
+    ck_eq32("[8] g=NULL returns 0", pid_step(0, &st, 100, 0, 0), 0);
+    ck_eq32("[8] st=NULL returns 0", pid_step(&g, 0, 100, 0, 0), 0);
+    ck_eq32("[8] flags=NULL is acceptable", pid_step(&g, &st, 0, 0, 0), 0);
+    ck_true("[8] those calls did not corrupt the state", st.started == 0 || st.started == 1);
 }
 
 /* ================================================================== */
-/* [9] 确定性                                                          */
+/* [9] Determinism                                                     */
 /* ================================================================== */
 
 static void test_determinism(void)
@@ -414,7 +414,7 @@ static void test_determinism(void)
     int32_t i;
     int same = 1;
 
-    printf("[9] 确定性\n");
+    printf("[9] determinism\n");
 
     pid_reset(&a);
     pid_reset(&b);
@@ -427,11 +427,11 @@ static void test_determinism(void)
         va = plant_step(ua, va, 1, 5);
         vb = plant_step(ub, vb, 1, 5);
     }
-    ck_true("[9] 两遍完全一致", same != 0);
+    ck_true("[9] both runs are identical", same != 0);
 }
 
 /* ================================================================== */
-/* [10] 饱和标志                                                       */
+/* [10] Saturation flag                                                */
 /* ================================================================== */
 
 static void test_saturation_flag(void)
@@ -441,52 +441,52 @@ static void test_saturation_flag(void)
     uint32_t fl = 0u;
     int32_t u;
 
-    printf("[10] 饱和标志\n");
+    printf("[10] saturation flag\n");
 
-    g.kp_q16 = PID_Q16_ONE; /* 1.0，偏差 1000 -> P 项正好等于上限 */
+    g.kp_q16 = PID_Q16_ONE; /* 1.0, error 1000 -> the P term lands exactly on the limit */
     g.ki_q16 = 0;
     g.kd_q16 = 0;
     pid_reset(&st);
     u = pid_step(&g, &st, 1000, 0, &fl);
-    ck_eq32("[10] 偏差 1000 -> 输出正好等于上限", u, 1000);
-    ck_true("[10] 恰好落在限幅边界也要置 SATURATED", (fl & PID_FLAG_SATURATED) != 0u);
+    ck_eq32("[10] error 1000 -> output exactly at the limit", u, 1000);
+    ck_true("[10] right on the limit boundary still sets SATURATED", (fl & PID_FLAG_SATURATED) != 0u);
 
-    /* ★ 这是曾经漏掉的那条：out_raw 只**正好等于**上限时，老的判据
-       `out != out_raw` 为假 -> 标志没置。语义上「偏差再大也推不动了」
-       与「已经被削掉」是同一件事，所以判据必须是「输出顶在边界」。 */
+    /* ★ This is the case the old code missed: when out_raw is **exactly** on the limit, the old
+       `out != out_raw` check was false, so the flag never got set. Semantically "more error cannot push
+       it any further" is the same thing as "already clipped", so the criterion must be "output pinned to the limit". */
     pid_reset(&st);
     u = pid_step(&g, &st, 5000, 0, &fl);
-    ck_eq32("[10] 偏差 5000 -> 输出被削到上限", u, 1000);
-    ck_true("[10] 被削掉时置 SATURATED", (fl & PID_FLAG_SATURATED) != 0u);
+    ck_eq32("[10] error 5000 -> output clipped to the limit", u, 1000);
+    ck_true("[10] clipping sets SATURATED", (fl & PID_FLAG_SATURATED) != 0u);
 
     pid_reset(&st);
     u = pid_step(&g, &st, -5000, 0, &fl);
-    ck_eq32("[10] 负向被削到下限", u, -1000);
-    ck_true("[10] 负向被削掉时置 SATURATED", (fl & PID_FLAG_SATURATED) != 0u);
+    ck_eq32("[10] negative side clipped to the lower limit", u, -1000);
+    ck_true("[10] negative clipping sets SATURATED", (fl & PID_FLAG_SATURATED) != 0u);
 
     pid_reset(&st);
     u = pid_step(&g, &st, -1000, 0, &fl);
-    ck_eq32("[10] 负向正好等于下限", u, -1000);
-    ck_true("[10] 负向恰好落在边界也置 SATURATED", (fl & PID_FLAG_SATURATED) != 0u);
+    ck_eq32("[10] negative side exactly at the lower limit", u, -1000);
+    ck_true("[10] negative boundary also sets SATURATED", (fl & PID_FLAG_SATURATED) != 0u);
 
-    /* 没顶到边界时必须不置 —— 否则这个标志就成了"永远为真"的噪声 */
+    /* must stay clear when not pinned to the limit -- otherwise the flag is always-true noise */
     pid_reset(&st);
     u = pid_step(&g, &st, 999, 0, &fl);
-    ck_eq32("[10] 偏差 999 -> 未饱和", u, 999);
-    ck_true("[10] 差一个计数就不置 SATURATED", (fl & PID_FLAG_SATURATED) == 0u);
+    ck_eq32("[10] error 999 -> not saturated", u, 999);
+    ck_true("[10] one count short of the limit does not set SATURATED", (fl & PID_FLAG_SATURATED) == 0u);
 
     g.kp_q16 = 1;
     pid_reset(&st);
     u = pid_step(&g, &st, 10, 0, &fl);
-    ck_true("[10] 未饱和时不置标志", (fl & PID_FLAG_SATURATED) == 0u);
-    ck_eq32("[10] 小偏差输出", u, 0);
+    ck_true("[10] no flag while unsaturated", (fl & PID_FLAG_SATURATED) == 0u);
+    ck_eq32("[10] output on a small error", u, 0);
 }
 
 /* ================================================================== */
 
 int main(void)
 {
-    printf("=== pid 速度环 PID 测试 ===\n");
+    printf("=== pid speed-loop PID tests ===\n");
 
     test_step_response();
     test_output_limit();

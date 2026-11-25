@@ -4,10 +4,10 @@
   <name>stm32_bridge</name>
   <version>0.1.0</version>
   <description>
-    OmniNav 串口桥：STM32F103（USART2，115200 8N1）&lt;-&gt; 树莓派 5 的 ROS2 Jazzy 节点。
-    订阅 /cmd_vel 下发 V 帧；解析 E/B/A 帧后发布 /odom、TF odom-&gt;base_link、
-    /battery_state、/diagnostics。麦轮正逆解与里程计圆弧积分**不在本包内**，
-    一律通过 ctypes 调用 firmware_core 编出的 libomninav_core.so（契约 §3/§5）。
+    OmniNav serial bridge: a ROS2 Jazzy node linking STM32F103 (USART2, 115200 8N1) to the Raspberry Pi 5.
+    Subscribes to /cmd_vel and sends V frames; parses E/B/A frames and publishes /odom, TF odom-&gt;base_link,
+    /battery_state and /diagnostics. Mecanum forward/inverse kinematics and arc-integration odometry are **not**
+    in this package; they are always called via ctypes into libomninav_core.so built from firmware_core (contract §3/§5).
   </description>
   <maintainer email="omninav@example.invalid">OmniNav</maintainer>
   <license>MIT</license>
@@ -20,7 +20,7 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>diagnostic_msgs</exec_depend>
   <exec_depend>tf2_ros</exec_depend>
-  <!-- pyserial：树莓派上 `sudo apt install python3-serial`（当前树莓派没有外网，见 README） -->
+  <!-- pyserial: on the Raspberry Pi run `sudo apt install python3-serial` (the Pi has no internet access right now, see README) -->
   <exec_depend>python3-serial</exec_depend>
 
   <test_depend>ament_copyright</test_depend>

@@ -1,25 +1,30 @@
 /**
   ******************************************************************************
   * @file    Src/core_selftest.c
-  * @brief   OmniNav 算法层（firmware_core）上板自检
+  * @brief   On-board self-test for the OmniNav algorithm layer (firmware_core)
   *
-  *          为什么要这个文件：
-  *            firmware_core 是纯算法层，放在 .uvprojx 的文件组里，但 Src/main.c
-  *            原本一个核心函数都不调用，armlink 会把 5 个目标文件整个丢弃
-  *            （Program Size 加不加 firmware_core 完全一样）。这里主动调用每个
-  *            模块的公开 API，才有真正的链接与运行期验证。
+  *          Why this file exists:
+  *            firmware_core is a pure algorithm layer and is listed in the
+  *            .uvprojx file group, but Src/main.c originally called none of its
+  *            functions, so armlink dropped all 5 object files
+  *            (Program Size is identical with or without firmware_core).
+  *            This file calls every module's public API, which is what makes a
+  *            real link and run-time verification happen.
   *
-  *          断言口径：
-  *            期望值全部抄自 firmware_core/test/test_*.c —— 那套用例在宿主机上
-  *            25344 条断言全绿，所以这里只做"同一输入 → 同一输出"的搬运，
-  *            不自己发明期望值。每条断言都能真分辨对错（不是恒真式）。
+  *          Assertion policy:
+  *            All expected values are copied from firmware_core/test/test_*.c --
+  *            that suite runs 25344 assertions all green on the host, so here we
+  *            only port "same input -> same output" and never invent expected
+  *            values ourselves. Every assertion can genuinely tell right from
+  *            wrong (no tautologies).
   *
-  *          输出：
-  *            每组一行 `   <组名>: N checks, M failed -> PASS/FAIL`
-  *            失败时逐条打印 `   FAIL <名称>: got X want Y`
-  *            末行汇总 `core_selftest: N checks, M failed`
+  *          Output:
+  *            one line per group `   <group>: N checks, M failed -> PASS/FAIL`
+  *            on failure print each case `   FAIL <name>: got X want Y`
+  *            final summary line `core_selftest: N checks, M failed`
   *
-  *          约束：禁止 %f（uart_printf 不支持），格式串里禁止中文。
+  *          Constraints: no %f (uart_printf does not support it), no Chinese in
+  *          format strings.
   ******************************************************************************
   */
 
@@ -33,15 +38,15 @@
 
 #include <stdint.h>
 
-/* main.c 提供的串口输出层（只用 32 位，不支持 %f / 64 位） */
+/* UART output layer provided by main.c (32-bit only, no %f / 64-bit) */
 void uart_printf(const char *fmt, ...);
 
 /* Private variables ---------------------------------------------------------*/
-static int         s_checks;        /* 累计断言数 */
-static int         s_fails;         /* 累计失败数 */
-static const char *s_group;         /* 当前组名 */
-static int         s_group_checks;  /* 组起始断言数 */
-static int         s_group_fails;   /* 组起始失败数 */
+static int         s_checks;        /* total assertions run */
+static int         s_fails;         /* total failures */
+static const char *s_group;         /* current group name */
+static int         s_group_checks;  /* assertion count at group start */
+static int         s_group_fails;   /* failure count at group start */
 
 /* Private functions ---------------------------------------------------------*/
 
@@ -62,7 +67,7 @@ static void group_end(void)
               s_group, c, f, (f == 0) ? "PASS" : "FAIL");
 }
 
-/* 精确相等断言（32 位） */
+/* Exact-equality assertion (32-bit) */
 static void ck(const char *what, int32_t got, int32_t want)
 {
   s_checks++;
@@ -73,7 +78,7 @@ static void ck(const char *what, int32_t got, int32_t want)
   }
 }
 
-/* 区间断言（32 位），用于宿主测试本身也带容差的量 */
+/* Range assertion (32-bit), for values whose host test also allows tolerance */
 static void ck_range(const char *what, int32_t got, int32_t lo, int32_t hi)
 {
   s_checks++;
@@ -84,7 +89,8 @@ static void ck_range(const char *what, int32_t got, int32_t lo, int32_t hi)
   }
 }
 
-/* 精确相等断言（64 位，里程量用；消息里的值都很小，打印时截到 32 位） */
+/* Exact-equality assertion (64-bit, used for odometry); the printed values are
+ * all small, so they are truncated to 32-bit for printing */
 static void ck64(const char *what, int64_t got, int64_t want)
 {
   s_checks++;
@@ -95,7 +101,8 @@ static void ck64(const char *what, int64_t got, int64_t want)
   }
 }
 
-/* 逐字节喂一串命令，返回产出的报文条数（最后一条留在 *m 里） */
+/* Feed a command string byte by byte; returns the number of messages produced
+ * (the last one stays in *m) */
 static int feed_str(proto_parser_t *p, const char *s, proto_msg_t *m)
 {
   int i;
@@ -112,7 +119,7 @@ static int feed_str(proto_parser_t *p, const char *s, proto_msg_t *m)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  [1] fixedpoint —— 定点标定与换算                                           */
+/*  [1] fixedpoint -- fixed-point calibration and conversion                    */
 /* -------------------------------------------------------------------------- */
 static void selftest_fixedpoint(void)
 {
@@ -138,7 +145,7 @@ static void selftest_fixedpoint(void)
   ck("counts_per_m_from_params(gear=0)",
      fixp_counts_per_m_from_params(44, 0, 80), 0);
 
-  /* 速度换算：100 mm/s 恰好 = 21 counts / 20 ms 窗口 */
+  /* Speed conversion: 100 mm/s is exactly 21 counts / 20 ms window */
   ck("mm_s_to_counts(100)", fixp_mm_s_to_counts(&s, 100), 21);
   ck("counts_to_mm_s(21)", fixp_counts_to_mm_s(&s, 21), 100);
   ck("counts_to_mm_s(1)", fixp_counts_to_mm_s(&s, 1), 5);
@@ -148,14 +155,14 @@ static void selftest_fixedpoint(void)
   ck("mm_s_to_counts(2000)", fixp_mm_s_to_counts(&s, 2000), 420);
   ck("counts_to_mm_s(420)", fixp_counts_to_mm_s(&s, 420), 1999);
 
-  /* 多窗口平均 */
+  /* Multi-window average */
   ck("counts_sum_to_mm_s(214,10)", fixp_counts_sum_to_mm_s(&s, 214, 10), 102);
   ck("counts_sum_to_mm_s(periods=1)",
      fixp_counts_sum_to_mm_s(&s, 21, 1), fixp_counts_to_mm_s(&s, 21));
   ck("counts_sum_to_mm_s(periods=0)", fixp_counts_sum_to_mm_s(&s, 214, 0), 0);
   ck("counts_sum_to_mm_s(periods=-3)", fixp_counts_sum_to_mm_s(&s, 214, -3), 0);
 
-  /* 里程换算 */
+  /* Distance conversion */
   ck64("counts_to_mm(10505)", fixp_counts_to_mm(&s, 10505), 1000);
   ck64("mm_to_counts(1000)", fixp_mm_to_counts(&s, 1000), 10505);
   ck64("counts_to_mm(2640)", fixp_counts_to_mm(&s, 2640), 251);
@@ -164,7 +171,7 @@ static void selftest_fixedpoint(void)
   ck64("mm_to_counts(-10505 ... -1000mm)", fixp_mm_to_counts(&s, -1000), -10505);
   ck64("counts_per_wheel_turn", fixp_counts_per_wheel_turn(&s), 2640);
 
-  /* 轮速 -> 车体角速度 */
+  /* Wheel speed -> body angular velocity */
   ck("wheel_mm_s_to_omega(500,300)", fixp_wheel_mm_s_to_omega_mrad_s(500, 300), 1667);
   ck("wheel_mm_s_to_omega(-500,300)", fixp_wheel_mm_s_to_omega_mrad_s(-500, 300), -1667);
   ck("wheel_mm_s_to_omega(300,300)", fixp_wheel_mm_s_to_omega_mrad_s(300, 300), 1000);
@@ -174,7 +181,7 @@ static void selftest_fixedpoint(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  [2] mecanum —— 麦轮逆解 / 正解 / 归一 / 死区 / 安装映射 / 总入口            */
+/*  [2] mecanum -- inverse / forward, normalize, deadzone, mount map, solve     */
 /* -------------------------------------------------------------------------- */
 static void selftest_mecanum(void)
 {
@@ -197,7 +204,7 @@ static void selftest_mecanum(void)
   ck("l_mm(default 150/150)", mecanum_l_mm(&g), 300);
   ck("mount_is_valid(identity)", mecanum_mount_is_valid(&mnt), 1);
 
-  /* 逆解：纯 vx */
+  /* Inverse: pure vx */
   t = mecanum_zero_twist();
   t.vx_mm_s = 500;
   mecanum_inverse(&g, &t, &w);
@@ -206,7 +213,7 @@ static void selftest_mecanum(void)
     ck("inverse vx=500 wheel", w.wheel_mm_s[i], 500);
   }
 
-  /* 逆解：纯 vy=400 -> {-400,+400,+400,-400} */
+  /* Inverse: pure vy=400 -> {-400,+400,+400,-400} */
   t = mecanum_zero_twist();
   t.vy_mm_s = 400;
   mecanum_inverse(&g, &t, &w);
@@ -215,7 +222,7 @@ static void selftest_mecanum(void)
   ck("inverse vy=400 RL", w.wheel_mm_s[MECANUM_RL],  400);
   ck("inverse vy=400 RR", w.wheel_mm_s[MECANUM_RR], -400);
 
-  /* 逆解：纯 omega=1000 mrad/s，L=300 -> rot=300 */
+  /* Inverse: pure omega=1000 mrad/s, L=300 -> rot=300 */
   t = mecanum_zero_twist();
   t.omega_mrad_s = 1000;
   mecanum_inverse(&g, &t, &w);
@@ -224,7 +231,7 @@ static void selftest_mecanum(void)
   ck("inverse omega=1000 RL", w.wheel_mm_s[MECANUM_RL], -300);
   ck("inverse omega=1000 RR", w.wheel_mm_s[MECANUM_RR],  300);
 
-  /* 正解：四轮全 500 -> 纯 vx */
+  /* Forward: all four wheels 500 -> pure vx */
   for (i = 0; i < 4; i++)
   {
     w.wheel_mm_s[i] = 500;
@@ -234,7 +241,7 @@ static void selftest_mecanum(void)
   ck("forward vy", t.vy_mm_s, 0);
   ck("forward omega", t.omega_mrad_s, 0);
 
-  /* 极坐标翻转：vy_polarity=-1 */
+  /* Polar flip: vy_polarity=-1 */
   {
     mecanum_geom_t gf = mecanum_default_geom();
     gf.vy_polarity = -1;
@@ -248,7 +255,7 @@ static void selftest_mecanum(void)
     ck("flip forward vy", t.vy_mm_s, 400);
   }
 
-  /* 非法几何：L=0 不许除零 */
+  /* Invalid geometry: L=0 must not divide by zero */
   {
     mecanum_geom_t g0 = g;
     g0.half_wheelbase_mm = 0;
@@ -262,7 +269,7 @@ static void selftest_mecanum(void)
     ck("forward invalid geom vx", t.vx_mm_s, 0);
   }
 
-  /* 饱和归一：峰值 6000 -> 3000，比例保持 */
+  /* Saturation normalize: peak 6000 -> 3000, ratios kept */
   in.wheel_mm_s[0] =  2000;
   in.wheel_mm_s[1] = -4000;
   in.wheel_mm_s[2] =  1000;
@@ -282,7 +289,7 @@ static void selftest_mecanum(void)
   ck("desaturate under limit no-op", mecanum_desaturate(&in, 500, &out), 0);
   ck("desat under limit FL", out.wheel_mm_s[0], 100);
 
-  /* 死区抬升：全零必须保持全零（安全硬约束） */
+  /* Deadzone lift: all-zero must stay all-zero (hard safety constraint) */
   in.wheel_mm_s[0] = 0;
   in.wheel_mm_s[1] = 0;
   in.wheel_mm_s[2] = 0;
@@ -307,7 +314,7 @@ static void selftest_mecanum(void)
   ck("deadzone all above no-op", mecanum_lift_deadzone(&in, 300, &out), 0);
   ck("deadzone no-op keeps FL", out.wheel_mm_s[0], 400);
 
-  /* 安装映射：恒等往返 */
+  /* Mount map: identity round trip */
   w.wheel_mm_s[0] =  111;
   w.wheel_mm_s[1] = -222;
   w.wheel_mm_s[2] =  333;
@@ -322,11 +329,11 @@ static void selftest_mecanum(void)
 
   {
     mecanum_mount_t bad = mecanum_identity_mount();
-    bad.motor_of_wheel[1] = 0;          /* 两个轮子抢同一个电机 */
+    bad.motor_of_wheel[1] = 0;          /* two wheels fighting over one motor */
     ck("mount_is_valid(duplicate)", mecanum_mount_is_valid(&bad), 0);
   }
 
-  /* ROS2 轮序：0=FL 1=FR 2=RR 3=RL */
+  /* ROS2 wheel order: 0=FL 1=FR 2=RR 3=RL */
   ros2[0] = 10;
   ros2[1] = 20;
   ros2[2] = 30;
@@ -341,7 +348,7 @@ static void selftest_mecanum(void)
   ck("to_ros2 2", back[2], 30);
   ck("to_ros2 3", back[3], 40);
 
-  /* 总入口 solve：零指令 + 死区 -> idle */
+  /* Top-level solve: zero command + deadzone -> idle */
   lim.wheel_max_mm_s      = 1000;
   lim.wheel_deadzone_mm_s =  400;
   t = mecanum_zero_twist();
@@ -354,7 +361,7 @@ static void selftest_mecanum(void)
     ck("solve idle motor", r.motor_mm_s[i], 0);
   }
 
-  /* 总入口 solve：饱和 + 死区，期望值取自 test_mecanum.c */
+  /* Top-level solve: saturation + deadzone, expected values from test_mecanum.c */
   t = mecanum_zero_twist();
   t.vx_mm_s      = 2000;
   t.vy_mm_s      = 1000;
@@ -367,7 +374,7 @@ static void selftest_mecanum(void)
   ck("solve motor2", r.motor_mm_s[2],  429);
   ck("solve motor3", r.motor_mm_s[3],  524);
 
-  /* 总入口 solve：指令落在死区内 -> 抬到死区边界 */
+  /* Top-level solve: command inside deadzone -> lifted to the deadzone edge */
   lim.wheel_max_mm_s      = 3000;
   lim.wheel_deadzone_mm_s =  500;
   t = mecanum_zero_twist();
@@ -380,7 +387,7 @@ static void selftest_mecanum(void)
     ck("solve lifted motor", r.motor_mm_s[i], 500);
   }
 
-  /* 总入口 solve：lim 为 NULL 表示不限幅 */
+  /* Top-level solve: lim == NULL means no limiting */
   t = mecanum_zero_twist();
   t.vx_mm_s = 2000;
   mecanum_solve(&g, 0, &mnt, &t, &r);
@@ -392,7 +399,7 @@ static void selftest_mecanum(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  [3] pid —— 限幅 / 饱和标志 / 微分 / 积分分离 / 复位                        */
+/*  [3] pid -- clamp / saturate flag / derivative / integral separation / reset */
 /* -------------------------------------------------------------------------- */
 static void selftest_pid(void)
 {
@@ -422,7 +429,8 @@ static void selftest_pid(void)
     ck("gains negative kd invalid", pid_gains_is_valid(&b), 0);
   }
 
-  /* 纯比例：kp=1.0，饱和边界必须靠输出与标志一起分辨 */
+  /* Pure proportional: kp=1.0; at the saturation edge the output alone is
+   * ambiguous, so check the flag too */
   g = pid_default_gains();
   g.kp_q16 = 65536;
   g.ki_q16 = 0;
@@ -452,12 +460,12 @@ static void selftest_pid(void)
   ck("kp=1 saturated(-1000)", (int32_t)(flags & PID_FLAG_SATURATED),
      (int32_t)PID_FLAG_SATURATED);
 
-  /* 空指针必须安全返回 0 */
+  /* Null pointers must safely return 0 */
   pid_reset(&st);
   ck("pid_step gains NULL", pid_step(0, &st, 100, 0, &flags), 0);
   ck("pid_step state NULL", pid_step(&g, 0, 100, 0, &flags), 0);
 
-  /* 非对称限幅 */
+  /* Asymmetric clamping */
   {
     pid_gains_t b = pid_default_gains();
     b.kp_q16  = 65536;
@@ -471,7 +479,8 @@ static void selftest_pid(void)
     ck("asym limit step2", pid_step(&b, &st, 5000, 0, &flags), 7);
   }
 
-  /* 微分作用在测量值上：设定值阶跃首步无微分尖峰 */
+  /* Derivative acts on the measurement: no derivative spike on the first step
+   * of a setpoint step */
   g = pid_default_gains();
   g.kp_q16 = 32768;      /* 0.5  */
   g.ki_q16 = 0;
@@ -482,7 +491,7 @@ static void selftest_pid(void)
   ck("diff step3 (sp100 m10)", pid_step(&g, &st, 100, 10, &flags), 45);
   ck64("diff ki=0 integ untouched", st.integ_raw, 0);
 
-  /* 积分分离：偏差 1000 > 50 -> 置标志且不积分 */
+  /* Integral separation: error 1000 > 50 -> flag set and no integration */
   g = pid_default_gains();
   g.integ_sep_mm_s = 50;
   pid_reset(&st);
@@ -491,13 +500,13 @@ static void selftest_pid(void)
      (int32_t)PID_FLAG_INTEG_SEP);
   ck64("integ_sep no windup", st.integ_raw, 0);
 
-  /* 偏差小于阈值 -> 正常积分 */
+  /* Error below the threshold -> normal integration */
   pid_reset(&st);
   (void)pid_step(&g, &st, 10, 0, &flags);
   ck("integ_sep not flagged", (int32_t)(flags & PID_FLAG_INTEG_SEP), 0);
   ck("integ_sep integrates", (int32_t)(st.integ_raw != 0), 1);
 
-  /* 复位清状态 */
+  /* Reset clears state */
   g = pid_default_gains();
   pid_reset(&st);
   for (i = 0; i < 10; i++)
@@ -514,7 +523,7 @@ static void selftest_pid(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  [4] odom —— 航迹推算（整数圆弧积分 + 角度归一化）                          */
+/*  [4] odom -- dead reckoning (integer arc integration + angle normalization) */
 /* -------------------------------------------------------------------------- */
 static void selftest_odom(void)
 {
@@ -529,19 +538,19 @@ static void selftest_odom(void)
 
   group_begin("odom");
 
-  /* 复位 */
+  /* Reset */
   odom_reset(&pose, &total);
   ck64("reset pose.x", pose.x_mm, 0);
   ck64("reset pose.y", pose.y_mm, 0);
   ck("reset pose.theta", pose.theta_mrad, 0);
   ck64("reset total.x", total.x_mm, 0);
   ck64("reset total.theta", total.theta_mrad, 0);
-  odom_reset(0, 0);            /* 双 NULL 不许崩 */
+  odom_reset(0, 0);            /* both NULL must not crash */
   odom_reset(&pose, 0);
   odom_reset(0, &total);
   ck("reset(NULL) survives pose", pose.theta_mrad, 0);
 
-  /* 直线：100 步 × 四轮各 +10 mm -> 前进 1000 mm */
+  /* Straight line: 100 steps x +10 mm on all four wheels -> 1000 mm forward */
   odom_reset(&pose, &total);
   for (k = 0; k < 4; k++)
   {
@@ -569,7 +578,7 @@ static void selftest_odom(void)
   ck64("straight pose.y", pose.y_mm, 0);
   ck("straight pose.theta", pose.theta_mrad, 0);
 
-  /* twist_out 语义：本步增量，不是速率 */
+  /* twist_out semantics: this step's increment, not a rate */
   odom_reset(&pose, &total);
   for (k = 0; k < 4; k++)
   {
@@ -582,7 +591,7 @@ static void selftest_odom(void)
   ck("dtwist inc.omega", inc.omega_mrad_s, 0);
   ck64("dtwist pose.x", pose.x_mm, 10);
 
-  /* 零增量：位姿不动 */
+  /* Zero delta: the pose must not move */
   odom_reset(&pose, &total);
   for (k = 0; k < 4; k++)
   {
@@ -593,7 +602,7 @@ static void selftest_odom(void)
   ck64("zero delta pose.x", pose.x_mm, 0);
   ck("zero delta pose.theta", pose.theta_mrad, 0);
 
-  /* 角度归一化：total 200000-63 再走一步 +63 */
+  /* Angle normalization: total 200000-63, then one more step of +63 */
   odom_reset(&pose, &total);
   total.theta_mrad = 200000 - 63;
   d_prev[0] = 0;
@@ -615,7 +624,7 @@ static void selftest_odom(void)
   ck("spin pose vs total off by 6284*k",
      (int32_t)(((pose.theta_mrad - (int32_t)total.theta_mrad) % 6284) == 0), 1);
 
-  /* 非法输入必须被拒且不改动位姿 */
+  /* Invalid input must be rejected without touching the pose */
   odom_reset(&pose, &total);
   for (k = 0; k < 4; k++)
   {
@@ -636,7 +645,7 @@ static void selftest_odom(void)
   ck64("rejected call left pose.x", pose.x_mm, 0);
   ck("odom twist_out NULL ok", odom_update(&pose, &total, &g, d_now, d_prev, 0), 1);
 
-  /* 重复性：同一输入两遍完全一致 */
+  /* Repeatability: the same input twice gives exactly the same result */
   odom_reset(&pose, &total);
   for (k = 0; k < 4; k++)
   {
@@ -661,7 +670,7 @@ static void selftest_odom(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  [5] protocol —— 行解析器                                                   */
+/*  [5] protocol -- line parser                                                 */
 /* -------------------------------------------------------------------------- */
 static void selftest_protocol(void)
 {
@@ -672,7 +681,7 @@ static void selftest_protocol(void)
 
   group_begin("protocol");
 
-  /* 正常帧 */
+  /* Normal frame */
   proto_init(&p);
   ck("feed V,300,-100,250 count", feed_str(&p, "V,300,-100,250\n", &m), 1);
   ck("cmd V", (int32_t)m.cmd, (int32_t)PROTO_CMD_V);
@@ -682,7 +691,7 @@ static void selftest_protocol(void)
   ck("V arg1", m.arg[1], -100);
   ck("V arg2", m.arg[2],  250);
 
-  /* 半包：换行之前不产出 */
+  /* Partial packet: nothing is produced before the newline */
   proto_init(&p);
   n = 0;
   for (i = 0; i < 7; i++)
@@ -693,7 +702,7 @@ static void selftest_protocol(void)
   ck("half packet completes at LF", proto_feed(&p, (uint8_t)'\n', &m), 1);
   ck("half packet arg0", m.arg[0], 1);
 
-  /* 粘包：一次喂两帧 */
+  /* Sticky packets: feed two frames at once */
   proto_init(&p);
   n = feed_str(&p, "V,1,2,3\nV,4,5,6\n", &m);
   ck("sticky packet count", n, 2);
@@ -701,7 +710,7 @@ static void selftest_protocol(void)
   ck("sticky last arg0", m.arg[0], 4);
   ck("sticky last arg2", m.arg[2], 6);
 
-  /* 行缓冲溢出后必须自愈 */
+  /* Line buffer overflow must self-heal */
   proto_init(&p);
   n = 0;
   for (i = 0; i < (PROTO_LINE_MAX + 50); i++)
@@ -716,7 +725,8 @@ static void selftest_protocol(void)
   ck("recovered arg1", m.arg[1], 8);
   ck("recovered error none", (int32_t)m.error, 0);
 
-  /* 非法字符：置 BAD_CHAR 但仍产出，下一帧必须干净 */
+  /* Bad character: sets BAD_CHAR but still produces the frame; the next frame
+   * must be clean */
   proto_init(&p);
   ck("badchar still produces", feed_str(&p, "V,1" "\x01" ",2,3\n", &m), 1);
   ck("badchar flag", (int32_t)(m.error & PROTO_ERR_BAD_CHAR),
@@ -725,7 +735,7 @@ static void selftest_protocol(void)
   ck("badchar next frame clean", feed_str(&p, "V,5,6,7\n", &m), 1);
   ck("badchar next error none", (int32_t)m.error, 0);
 
-  /* 未知命令 */
+  /* Unknown command */
   proto_init(&p);
   ck("unknown Z produces", feed_str(&p, "Z,1,2\n", &m), 1);
   ck("unknown cmd", (int32_t)m.cmd, (int32_t)PROTO_CMD_UNKNOWN);
@@ -736,7 +746,7 @@ static void selftest_protocol(void)
   ck("V300 glued -> unknown", feed_str(&p, "V300,0,0\n", &m), 1);
   ck("V300 cmd unknown", (int32_t)m.cmd, (int32_t)PROTO_CMD_UNKNOWN);
 
-  /* 参数个数 */
+  /* Argument count */
   proto_init(&p);
   ck("V,1,2 produces", feed_str(&p, "V,1,2\n", &m), 1);
   ck("V,1,2 argc flag", (int32_t)(m.error & PROTO_ERR_ARGC), (int32_t)PROTO_ERR_ARGC);
@@ -744,7 +754,7 @@ static void selftest_protocol(void)
   ck("M,1,2,3 argc flag", feed_str(&p, "M,1,2,3\n", &m), 1);
   ck("M,1,2,3 flag", (int32_t)(m.error & PROTO_ERR_ARGC), (int32_t)PROTO_ERR_ARGC);
 
-  /* 长度合法命令：S 零参数 / reset */
+  /* Commands with valid length: S zero-arg / reset */
   proto_init(&p);
   ck("S produces", feed_str(&p, "S\n", &m), 1);
   ck("S cmd", (int32_t)m.cmd, (int32_t)PROTO_CMD_S);
@@ -762,7 +772,7 @@ static void selftest_protocol(void)
   ck("resett -> unknown", feed_str(&p, "resett\n", &m), 1);
   ck("resett cmd unknown", (int32_t)m.cmd, (int32_t)PROTO_CMD_UNKNOWN);
 
-  /* 数值解析 */
+  /* Number parsing */
   proto_init(&p);
   ck("M 4-arg produces", feed_str(&p, "M,-1000,1000,-500,0\n", &m), 1);
   ck("M error none", (int32_t)m.error, 0);
@@ -798,7 +808,7 @@ static void selftest_protocol(void)
   ck("lone minus BAD_NUMBER",
      (int32_t)(m.error & PROTO_ERR_BAD_NUMBER), (int32_t)PROTO_ERR_BAD_NUMBER);
 
-  /* 行尾与空白 */
+  /* Line endings and whitespace */
   proto_init(&p);
   ck("CRLF produces", feed_str(&p, "V,300,0,0\r\n", &m), 1);
   ck("CRLF arg0", m.arg[0], 300);
@@ -816,7 +826,7 @@ static void selftest_protocol(void)
   ck("padded frame error none", (int32_t)m.error, 0);
   ck("padded frame raw_len>=9", (int32_t)(m.raw_len >= 9u), 1);
 
-  /* 命令名表 */
+  /* Command name table */
   ck("cmd_name(V)[0]", (int32_t)proto_cmd_name(PROTO_CMD_V)[0], (int32_t)'V');
   ck("cmd_name(M)[0]", (int32_t)proto_cmd_name(PROTO_CMD_M)[0], (int32_t)'M');
   ck("cmd_name(RESET)[0]", (int32_t)proto_cmd_name(PROTO_CMD_RESET)[0], (int32_t)'r');
@@ -825,7 +835,7 @@ static void selftest_protocol(void)
 }
 
 /* -------------------------------------------------------------------------- */
-/*  入口                                                                       */
+/*  Entry                                                                       */
 /* -------------------------------------------------------------------------- */
 void core_selftest_run(void)
 {

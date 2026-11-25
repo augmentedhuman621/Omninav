@@ -1,7 +1,7 @@
 <?xml version="1.0" ?>
 <!--
-  OmniNav 仿真世界：8 m x 6 m 仓储场地（围墙 + 两处货架/立柱 + 两个散货箱）
-  用途：验证 /cmd_vel -> /odom/TF 闭环，以及后续 Nav2 建图/定位/避障。
+  OmniNav simulation world: an 8 m x 6 m warehouse site (perimeter walls + two shelves/pillars + two loose boxes)
+  Purpose: validate the /cmd_vel -> /odom/TF loop, and later Nav2 mapping/localization/obstacle avoidance.
 -->
 <sdf version="1.6">
   <world name="omninav_warehouse">
@@ -18,7 +18,7 @@
       <real_time_update_rate>1000</real_time_update_rate>
     </physics>
 
-    <!-- ========== 围墙：x 方向长 8 m，y 方向宽 6 m，高 1.2 m ========== -->
+    <!-- ========== Perimeter walls: 8 m long in x, 6 m wide in y, 1.2 m high ========== -->
     <model name="wall_north">
       <static>true</static>
       <pose>0 3.0 0.6 0 0 0</pose>
@@ -67,7 +67,7 @@
       </link>
     </model>
 
-    <!-- ========== 货架：两面墙边的长条台面，模拟仓储货位 ========== -->
+    <!-- ========== Shelves: long benches along two walls, simulating warehouse storage slots ========== -->
     <model name="shelf_a">
       <static>true</static>
       <pose>-1.5 2.45 0.45 0 0 0</pose>
@@ -92,7 +92,7 @@
       </link>
     </model>
 
-    <!-- ========== 散货箱（导航绕障用） ========== -->
+    <!-- ========== Loose boxes (for navigation obstacle avoidance) ========== -->
     <model name="box_1">
       <static>true</static>
       <pose>1.2 1.0 0.20 0 0 0.3</pose>
@@ -117,7 +117,7 @@
       </link>
     </model>
 
-    <!-- 仿真时间 / 物理参数 -->
+    <!-- Simulation time / physics parameters -->
     <gui>
       <camera name="user_camera">
         <pose>-3.5 -3.5 2.6 0 0.35 0.75</pose>

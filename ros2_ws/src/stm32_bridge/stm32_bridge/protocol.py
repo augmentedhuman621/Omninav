@@ -1,32 +1,32 @@
-"""stm32_bridge.protocol —— STM32 <-> 树莓派 串口帧的纯编码 / 解析。
+"""stm32_bridge.protocol — pure encoding / parsing of STM32 <-> Raspberry Pi serial frames.
 
-设计硬约束（照 ``11_接口契约.md`` §3 / §4 与 T2 任务卡）：
+Hard design constraints (per ``11_interface_contract.md`` §3 / §4 and the T2 task card):
 
-* 本模块**不许 import rclpy**，也不 import 任何第三方库。
-  这样在没装 ROS2 的 Windows 上也能 ``python test_protocol.py`` 跑单测。
-* 只 import 标准库（``math`` / ``re`` / ``dataclasses`` / ``typing``）。
-* 解析必须容忍**半包 / 粘包 / 校验错 / 超长 / 非法字符**，并且能恢复。
-* 单位：串口侧恒为整数（mm/s、mrad/s）；浮点只出现在 ROS2 边界上。
-* 本模块**不含任何运动学 / 里程计数学** —— 那只有一份，在 ``firmware_core`` 的 C 代码里。
+* This module **must not import rclpy**, nor any third-party library.
+  This way the unit tests still run as ``python test_protocol.py`` on Windows without ROS2 installed.
+* Imports only the standard library (``math`` / ``re`` / ``dataclasses`` / ``typing``).
+* Parsing must tolerate **partial packets / coalesced packets / checksum errors / overlong lines / invalid characters** and still recover.
+* Units: the serial side is always integer (mm/s, mrad/s); floats appear only at the ROS2 boundary.
+* This module **contains no kinematics / odometry math** — that exists in exactly one place, the C code in ``firmware_core``.
 
-帧格式（**冻结**，见 ``11_接口契约.md`` §3）：
+Frame format (**frozen**, see ``11_interface_contract.md`` §3):
 
-下行 Pi -> STM32::
+Downlink Pi -> STM32::
 
-    V,<vx>,<vy>,<w>\\n          机体速度指令；vx/vy 单位 mm/s，w 单位 mrad/s，全部整数
-    M,<p1>,<p2>,<p3>,<p4>\\n    调试：直接给四路 PWM，范围 -1000 ~ 1000
-    P,<id>,<kp>,<ki>,<kd>\\n    在线改 PID 参数
-    S\\n                        软急停
-    reset\\n                    复位（上电时连发 3 次，间隔 0.3 s）
+    V,<vx>,<vy>,<w>\\n          body velocity command; vx/vy in mm/s, w in mrad/s, all integers
+    M,<p1>,<p2>,<p3>,<p4>\\n    debug: drive the four PWM channels directly, range -1000 ~ 1000
+    P,<id>,<kp>,<ki>,<kd>\\n    change PID parameters online
+    S\\n                        soft emergency stop
+    reset\\n                    reset (sent 3 times at startup, 0.3 s apart)
 
-上行 STM32 -> Pi::
+Uplink STM32 -> Pi::
 
-    E,<v1>,<v2>,<v3>,<v4>,<d1>,<d2>,<d3>,<d4>\\n   轮速 mm/s ×4 + 累计里程 mm ×4，50 Hz
-    B,<mv>,<flags>\\n                               电池电压 mV + 状态位，10 Hz
-    A,<text>\\n                                     命令回执 / 错误
+    E,<v1>,<v2>,<v3>,<v4>,<d1>,<d2>,<d3>,<d4>\\n   wheel speeds mm/s x4 + accumulated distance mm x4, 50 Hz
+    B,<mv>,<flags>\\n                               battery voltage mV + status flags, 10 Hz
+    A,<text>\\n                                     command acknowledgement / error
 
-轮序恒为 ``FL, FR, RL, RR``（= C 侧 ``MECANUM_FL/FR/RL/RR``），
-**不是** ROS2 ``mecanum_drive_controller`` 的 ``FL,FR,RR,RL``。
+The wheel order is always ``FL, FR, RL, RR`` (= C side ``MECANUM_FL/FR/RL/RR``),
+**not** the ROS2 ``mecanum_drive_controller`` order ``FL,FR,RR,RL``.
 """
 
 from __future__ import annotations
@@ -66,72 +66,72 @@ __all__ = [
 ]
 
 # --------------------------------------------------------------------------
-# 常量
+# Constants
 # --------------------------------------------------------------------------
 
-#: 单行最大字节数。超过就整行丢弃并重新同步（防串口半路接上时灌进来一整块垃圾）。
+#: Maximum bytes per line. Longer lines are dropped and the decoder resynchronizes (prevents a whole block of garbage when the serial port is attached mid-stream).
 MAX_LINE_BYTES = 256
 
-#: 轮数（FL, FR, RL, RR）。
+#: Number of wheels (FL, FR, RL, RR).
 WHEEL_COUNT = 4
 
 INT32_MIN = -(2 ** 31)
 INT32_MAX = 2 ** 31 - 1
 
-#: PWM 调试帧的取值范围（契约 §3）。
+#: Valid range of the PWM debug frame (contract §3).
 PWM_MIN = -1000
 PWM_MAX = 1000
 
-#: PID 通道号范围（4 路电机）。
+#: PID channel index range (4 motors).
 PID_ID_MIN = 0
 PID_ID_MAX = 3
 
-#: 键盘 / 断流时补发的停车帧。
+#: Stop frame sent on keyboard stop / command timeout.
 ZERO_VELOCITY_FRAME = b"V,0,0,0\n"
-#: 软急停。
+#: Soft emergency stop.
 SOFT_ESTOP_FRAME = b"S\n"
-#: 复位。契约 §3 要求上电时连发 3 次、间隔 0.3 s。
+#: Reset. Contract §3 requires 3 sends at startup, 0.3 s apart.
 RESET_FRAME = b"reset\n"
-#: 复位连发次数与间隔（契约 §3，冻结值）。
+#: Reset burst count and interval (contract §3, frozen values).
 RESET_BURST_COUNT = 3
 RESET_BURST_PERIOD_S = 0.3
 
-#: ★★ E 帧的**名义**频率。``06`` §7 把上行 E 帧冻结为 50 Hz（契约 §5.1 修订）。
+#: ★★ **Nominal** frequency of E frames. ``06`` §7 freezes the uplink E frame at 50 Hz (contract §5.1 revision).
 ENCODER_NOMINAL_HZ = 50.0
 
-#: ★★ 归一化 ``/odom`` 的 twist 时使用的**协议名义周期**，不是实测帧间隔。
+#: ★★ The **protocol nominal period** used to normalize the ``/odom`` twist, not the measured frame interval.
 #:
-#: ``odom_update()`` 的 ``twist_out`` 是**本帧位移增量**（mm / mrad），
-#: 它的签名里根本没有 ``dt`` 参数，所以它在原理上产不出「每秒」量纲。
-#: 契约 §4 又要求 ``/odom`` 的 twist 是 m/s、rad/s ⇒ 桥必须自己除一个时间。
+#: ``odom_update()`` returns ``twist_out`` as a **per-frame displacement increment** (mm / mrad);
+#: its signature has no ``dt`` parameter at all, so it cannot produce a "per second" quantity in principle.
+#: Contract §4 nonetheless requires the ``/odom`` twist in m/s and rad/s ⇒ the bridge must divide by a time itself.
 #:
-#: **这个时间恒取 1/50 s = 0.020 s，不许用每帧实测间隔。**
-#: 原因（2026-xx 树莓派实测踩到的）：串口 / pty 按**块**交付，一次 ``read()``
-#: 常常返回好几条 E 帧；逐帧去测「到达间隔」会退化到 ~0，
-#: 于是 ``Δd / dt`` 被放大 20 倍 —— 实测就出现了 ``twist = 4.0 m/s`` 的尖峰
-#: （``Δd = 4 mm``、``dt`` 被钳到 1 ms）。位置积分本身没问题，只有这个派生量被除歪。
-#: 实测帧间隔依然有用，但它**只能进诊断**（判断发送端是否停摆 / 掉帧）。
+#: **This time is always 1/50 s = 0.020 s; the measured per-frame interval must not be used.**
+#: Why (hit during Raspberry Pi measurements in 2026-xx): serial / pty delivers data in **blocks**, so one ``read()`` 
+#: often returns several E frames; measuring the "arrival interval" frame by frame degenerates to ~0,
+#: so ``Δd / dt`` is inflated 20x — measurements actually showed ``twist = 4.0 m/s`` spikes
+#: (``Δd = 4 mm`` and ``dt`` clamped to 1 ms). Position integration itself was fine; only this derived quantity was divided wrong.
+#: The measured frame interval is still useful, but it **may only feed diagnostics** (detecting a stalled sender / dropped frames).
 NOMINAL_ENCODER_PERIOD_S = 1.0 / ENCODER_NOMINAL_HZ
 
 _INT_TOKEN = re.compile(r"\A[+-]?[0-9]+\Z")
 
-#: 原始行留作证据时的最大长度（够日志用，且不会把一整块垃圾写进日志）。
+#: Maximum length of a raw line kept as evidence (enough for logging without dumping a whole block of garbage into the log).
 _RAW_KEEP = 80
 
 
 # --------------------------------------------------------------------------
-# 限速器（纯 stdlib，可脱开 ROS2 单测）
+# Rate limiter (pure stdlib, unit-testable without ROS2)
 # --------------------------------------------------------------------------
 
 
 class RateLimiter:
-    """按最小间隔放行的节流器。
+    """A throttle that lets events pass no more often than a minimum interval.
 
-    ★ 放在 ``protocol.py`` 里是**故意的**：这两个限速（下行 ``V`` 20 Hz、
-    ``/diagnostics`` 1 Hz）是纯逻辑，放在这里就能在没有 ROS2 的机器上单测，
-    不必等树莓派。
+    ★ It is **deliberate** that this lives in ``protocol.py``: the two rate limits (downlink ``V`` at 20 Hz,
+    ``/diagnostics`` at 1 Hz) are pure logic, so placing them here keeps them unit-testable on a machine without ROS2,
+    without waiting for the Raspberry Pi.
 
-    时钟由调用方传入（``time.monotonic()``），所以单测可以喂假时间。
+    The caller supplies the clock (``time.monotonic()``), so unit tests can feed fake time.
     """
 
     __slots__ = ("_min_period_s", "_last_emit_s")
@@ -139,7 +139,7 @@ class RateLimiter:
     def __init__(self, min_period_s: float) -> None:
         value = float(min_period_s)
         if not math.isfinite(value) or value < 0.0:
-            raise ValueError("min_period_s 必须是非负有限数，收到 %r" % (min_period_s,))
+            raise ValueError("min_period_s must be a non-negative finite number, got %r" % (min_period_s,))
         self._min_period_s = value
         self._last_emit_s: Optional[float] = None
 
@@ -152,7 +152,7 @@ class RateLimiter:
         return self._last_emit_s
 
     def should_emit(self, now_s: float, force: bool = False) -> bool:
-        """现在能不能放行。``force=True`` 一定放行（安全帧走这条路）。"""
+        """Whether an event may pass now. ``force=True`` always passes (safety frames take this path)."""
         if force:
             self._last_emit_s = now_s
             return True
@@ -169,18 +169,18 @@ class RateLimiter:
 
 
 # --------------------------------------------------------------------------
-# 单位换算（契约 §4 的两行公式，仅此一处）
+# Unit conversion (the two-line formula of contract §4, only here)
 # --------------------------------------------------------------------------
 
 
 def round_half_away_from_zero(value: float) -> int:
-    """四舍五入，且**负数也远离零** —— 与 C 的 ``round()`` / ``lround()`` 一致。
+    """Round half away from zero, and **negatives also away from zero** — matching C ``round()`` / ``lround()``.
 
-    ★★ 不要用 Python 内建的 ``round()``：它是「银行家舍入」（round-half-to-even），
-    ``round(0.5) == 0`` 而 ``round(1.5) == 2``；C 的 ``round(0.5) == 1``。
-    契约 §4 明确要求「取整用四舍五入，不要 ``int()`` 截断（负速度会偏一个 LSB，
-    长期累积成系统性偏差）」—— 半个 LSB 的银行家舍入同样是系统性偏差，
-    所以这里自己实现，把行为钉死在 C 的语义上。
+    ★★ Do not use Python's built-in ``round()``: it does "banker's rounding" (round-half-to-even),
+    so ``round(0.5) == 0`` while ``round(1.5) == 2``; C gives ``round(0.5) == 1``.
+    Contract §4 explicitly requires "round to nearest, do not truncate with ``int()`` (negative speeds would be off by one LSB,
+    which accumulates into a systematic drift over time)" — half-an-LSB banker's rounding is a systematic bias just the same,
+    so this is implemented locally and the behavior is pinned to C semantics.
 
     >>> round_half_away_from_zero(0.5)
     1
@@ -190,47 +190,47 @@ def round_half_away_from_zero(value: float) -> int:
     0
     """
     if not math.isfinite(value):
-        raise ValueError("取整输入必须是有限数，拿到 %r" % (value,))
+        raise ValueError("Rounding input must be a finite number, got %r" % (value,))
     if value >= 0.0:
         return int(math.floor(value + 0.5))
     return int(math.ceil(value - 0.5))
 
 
 def m_s_to_mm_s(value: float) -> int:
-    """ROS2 线速度 m/s -> 串口 mm/s。"""
+    """ROS2 linear velocity m/s -> serial mm/s."""
     return round_half_away_from_zero(value * 1000.0)
 
 
 def rad_s_to_mrad_s(value: float) -> int:
-    """ROS2 角速度 rad/s -> 串口 mrad/s。"""
+    """ROS2 angular velocity rad/s -> serial mrad/s."""
     return round_half_away_from_zero(value * 1000.0)
 
 
 def mm_s_to_m_s(value: int) -> float:
-    """串口 mm/s -> ROS2 线速度 m/s。"""
+    """Serial mm/s -> ROS2 linear velocity m/s."""
     return value / 1000.0
 
 
 def mrad_s_to_rad_s(value: int) -> float:
-    """串口 mrad/s -> ROS2 角速度 rad/s。"""
+    """Serial mrad/s -> ROS2 angular velocity rad/s."""
     return value / 1000.0
 
 
 # --------------------------------------------------------------------------
-# 下行编码
+# Downlink encoding
 # --------------------------------------------------------------------------
 
 
 def _require_int32(name: str, value: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
-        raise TypeError("%s 必须是 int，拿到 %r" % (name, type(value).__name__))
+        raise TypeError("%s must be an int, got %r" % (name, type(value).__name__))
     if not INT32_MIN <= value <= INT32_MAX:
-        raise ValueError("%s=%d 超出 int32 范围" % (name, value))
+        raise ValueError("%s=%d is outside the int32 range" % (name, value))
     return value
 
 
 def encode_velocity(vx_mm_s: int, vy_mm_s: int, omega_mrad_s: int) -> bytes:
-    """编码 ``V`` 速度帧。三个参数都必须是**整数** mm/s / mrad/s。"""
+    """Encode a ``V`` velocity frame. All three arguments must be **integers** in mm/s / mrad/s."""
     return b"V,%d,%d,%d\n" % (
         _require_int32("vx_mm_s", vx_mm_s),
         _require_int32("vy_mm_s", vy_mm_s),
@@ -239,9 +239,9 @@ def encode_velocity(vx_mm_s: int, vy_mm_s: int, omega_mrad_s: int) -> bytes:
 
 
 def encode_cmd_vel(linear_x: float, linear_y: float, angular_z: float) -> bytes:
-    """把 ROS2 ``Twist`` 的三个浮点分量编码成 ``V`` 帧（契约 §4 的换算表）。
+    """Encode the three float components of a ROS2 ``Twist`` into a ``V`` frame (contract §4 conversion table).
 
-    这是**唯一**允许出现 ``m/s -> mm/s`` 换算的地方。
+    This is the **only** place where ``m/s -> mm/s`` conversion is allowed.
     """
     return encode_velocity(
         m_s_to_mm_s(linear_x), m_s_to_mm_s(linear_y), rad_s_to_mrad_s(angular_z)
@@ -249,21 +249,21 @@ def encode_cmd_vel(linear_x: float, linear_y: float, angular_z: float) -> bytes:
 
 
 def encode_motor(p1: int, p2: int, p3: int, p4: int) -> bytes:
-    """编码 ``M`` 调试帧（直接给四路 PWM，-1000 ~ 1000）。"""
+    """Encode an ``M`` debug frame (drive the four PWM channels directly, -1000 ~ 1000)."""
     values = []
     for index, raw in enumerate((p1, p2, p3, p4)):
         value = _require_int32("p%d" % (index + 1), raw)
         if not PWM_MIN <= value <= PWM_MAX:
-            raise ValueError("p%d=%d 超出 PWM 范围 [%d, %d]" % (index + 1, value, PWM_MIN, PWM_MAX))
+            raise ValueError("p%d=%d is outside the PWM range [%d, %d]" % (index + 1, value, PWM_MIN, PWM_MAX))
         values.append(value)
     return b"M,%d,%d,%d,%d\n" % tuple(values)
 
 
 def encode_pid(pid_id: int, kp: int, ki: int, kd: int) -> bytes:
-    """编码 ``P`` 在线改 PID 帧。"""
+    """Encode a ``P`` online PID-update frame."""
     channel = _require_int32("pid_id", pid_id)
     if not PID_ID_MIN <= channel <= PID_ID_MAX:
-        raise ValueError("pid_id=%d 超出 [%d, %d]" % (channel, PID_ID_MIN, PID_ID_MAX))
+        raise ValueError("pid_id=%d is outside [%d, %d]" % (channel, PID_ID_MIN, PID_ID_MAX))
     return b"P,%d,%d,%d,%d\n" % (
         channel,
         _require_int32("kp", kp),
@@ -273,7 +273,7 @@ def encode_pid(pid_id: int, kp: int, ki: int, kd: int) -> bytes:
 
 
 # --------------------------------------------------------------------------
-# 上行帧的数据类型
+# Uplink frame data types
 # --------------------------------------------------------------------------
 
 
@@ -283,7 +283,7 @@ def _clip_raw(text: str) -> str:
 
 @dataclass(frozen=True)
 class EncoderFrame:
-    """``E`` 帧：四轮轮速（mm/s）+ 四轮累计里程（mm），顺序 FL, FR, RL, RR。"""
+    """``E`` frame: four wheel speeds (mm/s) + four accumulated distances (mm), order FL, FR, RL, RR."""
 
     kind: ClassVar[str] = "E"
     v_mm_s: Tuple[int, int, int, int] = (0, 0, 0, 0)
@@ -296,7 +296,7 @@ class EncoderFrame:
 
 @dataclass(frozen=True)
 class BatteryFrame:
-    """``B`` 帧：电池电压（mV）+ 状态位。状态位的位定义在 STM32 固件里，本契约未冻结。"""
+    """``B`` frame: battery voltage (mV) + status flags. The flag bit definitions live in the STM32 firmware and are not frozen by this contract."""
 
     kind: ClassVar[str] = "B"
     millivolts: int = 0
@@ -310,7 +310,7 @@ class BatteryFrame:
 
 @dataclass(frozen=True)
 class AckFrame:
-    """``A`` 帧：命令回执 / 错误文本。文本里**允许含逗号**，所以只按第一个逗号切分。"""
+    """``A`` frame: command acknowledgement / error text. The text **may contain commas**, so split only on the first comma."""
 
     kind: ClassVar[str] = "A"
     text: str = ""
@@ -319,7 +319,7 @@ class AckFrame:
 
 @dataclass(frozen=True)
 class UnknownFrame:
-    """无法识别 / 畸形的行。**不静默丢掉** —— 交给上层计数并记日志。"""
+    """Unrecognized / malformed line. **Not silently dropped** — passed up for counting and logging."""
 
     kind: ClassVar[str] = "?"
     prefix: str = ""
@@ -327,12 +327,12 @@ class UnknownFrame:
     raw: str = ""
 
 
-Frame = object  # 上层只需 isinstance 判断具体类型；这里只为 typing 可读性留个名字。
+Frame = object  # upper layers only need isinstance checks on concrete types; this name exists only for typing readability.
 
 
 @dataclass
 class DecoderStats:
-    """解析健康度计数器。放在 ``/diagnostics`` 里比"猜为什么没数据"便宜得多。"""
+    """Parser health counters. Putting them in ``/diagnostics`` is far cheaper than guessing why no data arrived."""
 
     frames_ok: int = 0
     dropped_lines: int = 0
@@ -351,22 +351,22 @@ class DecoderStats:
 
 
 # --------------------------------------------------------------------------
-# 单行解析
+# Single-line parsing
 # --------------------------------------------------------------------------
 
 
 def _parse_int32_token(token: str):
-    """把 token 解析成 int32；不合法返回 ``None``。
+    """Parse a token as int32; returns ``None`` if invalid.
 
-    ★ 只接受 ``^[+-]?[0-9]+$``：``1.5`` / ``1e3`` / ``0x10`` / ``" 1"`` 全部拒绝。
-    用 ``int()`` 直接试会放过 ``"  1  "`` 和 ``"1_0"``（Python 的下划线字面量规则），
-    所以先过正则再转换。
+    ★ Only ``^[+-]?[0-9]+$`` is accepted: ``1.5`` / ``1e3`` / ``0x10`` / ``" 1"`` are all rejected.
+    Trying ``int()`` directly would accept ``"  1  "`` and ``"1_0"`` (Python's underscore literal rule),
+    so a regex check comes first, then the conversion.
     """
     if not _INT_TOKEN.match(token):
         return None
     try:
         value = int(token, 10)
-    except ValueError:  # pragma: no cover - 正则已经挡住
+    except ValueError:  # pragma: no cover - the regex already rejects it
         return None
     if not INT32_MIN <= value <= INT32_MAX:
         return None
@@ -374,10 +374,10 @@ def _parse_int32_token(token: str):
 
 
 def parse_line(text: str) -> Optional[Frame]:
-    """解析**一行**（不含行尾 ``\\n``，首尾空白已由调用方去掉）。
+    """Parse **one line** (without the trailing ``\\n``; leading/trailing whitespace already stripped by the caller).
 
-    返回 ``None`` 表示这一行是空的（正常，不算错误）。
-    返回 ``UnknownFrame`` 表示畸形 / 未知前缀 —— 调用方应当计数并记日志。
+    Returning ``None`` means the line was empty (normal, not an error).
+    Returning ``UnknownFrame`` means malformed / unknown prefix — the caller should count it and log.
     """
     if not text:
         return None
@@ -386,12 +386,12 @@ def parse_line(text: str) -> Optional[Frame]:
 
     if head == "E":
         if not sep:
-            return UnknownFrame(prefix="E", reason="缺失逗号分隔符", raw=_clip_raw(text))
+            return UnknownFrame(prefix="E", reason="missing comma separator", raw=_clip_raw(text))
         tokens = rest.split(",")
         if len(tokens) != 2 * WHEEL_COUNT:
             return UnknownFrame(
                 prefix="E",
-                reason="需要 %d 个字段，实际 %d 个" % (2 * WHEEL_COUNT, len(tokens)),
+                reason="expected %d fields, got %d" % (2 * WHEEL_COUNT, len(tokens)),
                 raw=_clip_raw(text),
             )
         values: List[int] = []
@@ -400,7 +400,7 @@ def parse_line(text: str) -> Optional[Frame]:
             if value is None:
                 return UnknownFrame(
                     prefix="E",
-                    reason="第 %d 个字段不是 int32：%r" % (index + 1, _clip_raw(token)),
+                    reason="field %d is not an int32: %r" % (index + 1, _clip_raw(token)),
                     raw=_clip_raw(text),
                 )
             values.append(value)
@@ -412,66 +412,66 @@ def parse_line(text: str) -> Optional[Frame]:
 
     if head == "B":
         if not sep:
-            return UnknownFrame(prefix="B", reason="缺失逗号分隔符", raw=_clip_raw(text))
+            return UnknownFrame(prefix="B", reason="missing comma separator", raw=_clip_raw(text))
         tokens = rest.split(",")
         if len(tokens) != 2:
             return UnknownFrame(
-                prefix="B", reason="需要 2 个字段，实际 %d 个" % len(tokens), raw=_clip_raw(text)
+                prefix="B", reason="expected 2 fields, got %d" % len(tokens), raw=_clip_raw(text)
             )
         millivolts = _parse_int32_token(tokens[0])
         flags = _parse_int32_token(tokens[1])
         if millivolts is None or flags is None:
-            return UnknownFrame(prefix="B", reason="字段不是 int32", raw=_clip_raw(text))
+            return UnknownFrame(prefix="B", reason="field is not an int32", raw=_clip_raw(text))
         return BatteryFrame(millivolts=millivolts, flags=flags, raw=_clip_raw(text))
 
     if head == "A":
         if not sep:
-            # ★ 与 E / B 保持一致：裸 "A"（没有逗号）是畸形行，不能当成"空回执"。
-            #   否则一行噪声 "A" 会被解析成一条合法回执，把 /diagnostics 带偏。
-            return UnknownFrame(prefix="A", reason="缺失逗号分隔符", raw=_clip_raw(text))
-        # 文本里允许含逗号，所以 rest 原样收下，不再切分。
+            # ★ Keep this consistent with E / B: a bare "A" (no comma) is a malformed line and must not be treated as an "empty acknowledgement".
+            #   otherwise a single line of noise "A" would parse as a valid acknowledgement and skew /diagnostics.
+            return UnknownFrame(prefix="A", reason="missing comma separator", raw=_clip_raw(text))
+        # The text may contain commas, so take rest verbatim without further splitting.
         return AckFrame(text=rest, raw=_clip_raw(text))
 
-    return UnknownFrame(prefix=_clip_raw(head), reason="未知前缀", raw=_clip_raw(text))
+    return UnknownFrame(prefix=_clip_raw(head), reason="unknown prefix", raw=_clip_raw(text))
 
 
 # --------------------------------------------------------------------------
-# 流式解码器：吃 byte 流，吐帧
+# Streaming decoder: consumes a byte stream, emits frames
 # --------------------------------------------------------------------------
 
 
 class LineDecoder:
-    """把串口字节流切成帧，容忍半包 / 粘包 / 超长 / 非法字符。
+    """Split a serial byte stream into frames, tolerating partial packets / coalesced packets / overlong lines / invalid characters.
 
-    与 ``pyserial`` 的 ``readline()`` 的区别（为什么不用它）：
+    Differences from ``pyserial``'s ``readline()`` (and why it is not used):
 
-    * ``readline()`` 遇到非法字节或超长行会**一直长到把内存吃光**；
-      本实现超过 :data:`MAX_LINE_BYTES` 就丢弃并重新同步。
-    * ``readline()`` 的 ``\r\n`` 处理要额外 strip；本实现按 ``\\n`` 切，
-      再统一 strip 空白。
-    * 本实现顺带给出健康度计数（:class:`DecoderStats`）。
+    * ``readline()`` keeps growing until memory is exhausted on invalid bytes or an overlong line;
+      this implementation drops the line and resynchronizes once :data:`MAX_LINE_BYTES` is exceeded.
+    * ``readline()`` needs extra stripping for ``\\r\\n``; this implementation splits on ``\\n``
+      and then strips whitespace uniformly.
+    * This implementation also provides health counters (:class:`DecoderStats`).
     """
 
     def __init__(self, max_line_bytes: int = MAX_LINE_BYTES) -> None:
         if max_line_bytes < 8:
-            raise ValueError("max_line_bytes 太小：%r" % (max_line_bytes,))
+            raise ValueError("max_line_bytes is too small: %r" % (max_line_bytes,))
         self.max_line_bytes = max_line_bytes
         self.stats = DecoderStats()
         self._buf = bytearray()
         self._skipping = False
 
     def reset(self) -> None:
-        """丢掉半个包（例如串口刚被重新打开）。"""
+        """Drop a partial packet (e.g. after the serial port was just reopened)."""
         self._buf.clear()
         self._skipping = False
 
     def feed(self, data: bytes) -> List[Frame]:
-        """喂一段字节，返回**这一批**解出来的帧（顺序与到达顺序一致）。"""
+        """Feed a chunk of bytes and return the frames decoded **in this batch** (in arrival order)."""
         frames: List[Frame] = []
         for byte in data:
             if byte == 0x0A:  # \n
                 if self._skipping:
-                    # 超长行的收尾：丢掉整行，从这一行之后重新同步。
+                    # End of an overlong line: drop the whole line and resync after it.
                     self._skipping = False
                     self._buf.clear()
                     self.stats.overlong_lines += 1
@@ -494,34 +494,34 @@ class LineDecoder:
 
             self._buf.append(byte)
             if len(self._buf) > self.max_line_bytes:
-                # ★ 关键：不要无限增长。丢弃并等下一个 \n 重新同步。
+                # ★ Key point: never grow without bound. Drop it and wait for the next \n to resync.
                 self._skipping = True
                 self._buf.clear()
         return frames
 
     def _decode_line(self, line: bytes):
         text = line.decode("ascii", errors="replace")
-        # ★★ 顺序很要命：必须**先剥掉行尾的 CR / 空白，再查可打印性**。
-        #    反过来的话，CRLF 行尾那个 \r（0x0D < 0x20）会被当成"控制字符"整行丢掉：
-        #      * `B,12000,1\r` 会解析失败，掉进 UnknownFrame；
-        #      * 一个孤零零的 `\r\n`（空行）会变成一条**假错误**，污染 nonascii/dropped 计数。
-        #    STM32 侧将来只要改用 `\r\n`，桥就会静默丢掉**所有**帧 —— 这是个不报错的静默失效。
-        #    只剥 " \t\r\n" 而**不用** text.strip()：后者按 Unicode 空白剥，会把
-        #    \x0b \x0c \x1c-\x1f \x85 \xa0 也一起吞掉，而那些恰恰是波特率不对的症状。
+        # ★★ Order matters a lot: **strip the trailing CR / whitespace first, then check printability**.
+        #    If reversed, the \r (0x0D < 0x20) of a CRLF line ending is treated as a "control character" and the whole line is dropped:
+        #      * `B,12000,1\r` would fail to parse and fall into UnknownFrame;
+        #      * a lone `\r\n` (blank line) would become a **fake error**, polluting the nonascii/dropped counters.
+        #    If the STM32 side ever switches to `\r\n`, the bridge would silently drop **all** frames — a silent failure that reports nothing.
+        #    Strip only " \t\r\n" and **do not** use text.strip(): the latter strips per Unicode whitespace and would also swallow
+        #    \x0b \x0c \x1c-\x1f \x85 \xa0, which are exactly the symptoms of a wrong baud rate.
         stripped = text.strip(" \t\r\n")
         if not stripped:
-            return None  # 空行 / 裸 \r\n —— 不算错误
+            return None  # blank line / bare \r\n — not an error
         for char in stripped:
             code = ord(char)
             if code < 0x20 or code > 0x7E:
-                # 非可打印 ASCII：波特率不对时的典型症状，整行丢弃。
+                # Non-printable ASCII: a typical symptom of a wrong baud rate; drop the whole line.
                 self.stats.nonascii_lines += 1
                 return UnknownFrame(
-                    prefix="", reason="含非 ASCII / 控制字符", raw=_clip_raw(stripped)
+                    prefix="", reason="contains non-ASCII / control characters", raw=_clip_raw(stripped)
                 )
         return parse_line(stripped)
 
 
 def decode_all(data: bytes, max_line_bytes: int = MAX_LINE_BYTES) -> List[Frame]:
-    """一次性把整块 bytes 解成帧（给单测和离线日志分析用）。"""
+    """Decode a whole block of bytes into frames in one call (for unit tests and offline log analysis)."""
     return LineDecoder(max_line_bytes=max_line_bytes).feed(data)

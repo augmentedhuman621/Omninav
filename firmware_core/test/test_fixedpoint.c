@@ -1,17 +1,17 @@
 /*
- * test_fixedpoint.c — fixedpoint 模块的测试台
+ * test_fixedpoint.c - test bench for the fixedpoint module
  *
- * 覆盖：
- *   [1] 默认参数与参数校验
- *   [2] counts/m 的推导（★ 全项目唯一的常数来源，这里把算术打印出来）
- *   [3] 速度双向换算与对称四舍五入
- *   [4] 单计数台阶（速度反馈的分辨率下限）
- *   [5] ★ 多窗口累加降量化噪声
- *   [6] 累计里程换算与往返自洽
- *   [7] 大数值不溢出（clamp 保护）
- *   [8] 一圈计数自检（必须对上 44 × 60 = 2640）
- *   [9] 一维角速度换算
- *  [10] 非法输入与确定性
+ * Coverage:
+ *   [1] Default parameters and parameter validation
+ *   [2] Derivation of counts/m (★ the only source of this constant; arithmetic printed here)
+ *   [3] Bidirectional speed conversion with symmetric rounding
+ *   [4] Single-count step (resolution floor of speed feedback)
+ *   [5] ★ Multi-window accumulation lowers quantization noise
+ *   [6] Accumulated distance conversion and round-trip consistency
+ *   [7] Large values do not overflow (clamp protection)
+ *   [8] One-turn count self-check (must match 44 x 60 = 2640)
+ *   [9] One-dimensional angular velocity conversion
+ *  [10] Invalid input and determinism
  */
 
 #include <stdio.h>
@@ -70,31 +70,31 @@ static void test_default_and_valid(void)
     fixp_scale_t s;
     fixp_scale_t bad;
 
-    printf("[1] 默认参数与参数校验\n");
+    printf("[1] Default parameters and parameter validation\n");
 
     s = fixp_default_scale();
-    printf("  [info] 默认：counts_per_m = %ld, 轮径 = %ld mm, 测速窗口 = %ld ms\n",
+    printf("  [info] defaults: counts_per_m = %ld, wheel dia = %ld mm, period = %ld ms\n",
            (long)s.counts_per_m, (long)s.wheel_diameter_mm, (long)s.period_ms);
 
-    ck_i32("[1] counts_per_m 名义值 10505（1:60）", s.counts_per_m, 10505);
-    ck_i32("[1] 轮径 80 mm", s.wheel_diameter_mm, 80);
-    ck_i32("[1] 测速窗口 20 ms", s.period_ms, 20);
-    ck_true("[1] 默认为合法", fixp_scale_is_valid(&s) == 1);
+    ck_i32("[1] counts_per_m nominal 10505 (1:60)", s.counts_per_m, 10505);
+    ck_i32("[1] wheel diameter 80 mm", s.wheel_diameter_mm, 80);
+    ck_i32("[1] speed window 20 ms", s.period_ms, 20);
+    ck_true("[1] defaults are valid", fixp_scale_is_valid(&s) == 1);
 
-    ck_true("[1] NULL 不合法", fixp_scale_is_valid(0) == 0);
+    ck_true("[1] NULL is invalid", fixp_scale_is_valid(0) == 0);
 
     bad = s;
     bad.counts_per_m = 0;
-    ck_true("[1] counts_per_m=0 不合法", fixp_scale_is_valid(&bad) == 0);
+    ck_true("[1] counts_per_m=0 is invalid", fixp_scale_is_valid(&bad) == 0);
     bad = s;
     bad.counts_per_m = -1;
-    ck_true("[1] counts_per_m<0 不合法", fixp_scale_is_valid(&bad) == 0);
+    ck_true("[1] counts_per_m<0 is invalid", fixp_scale_is_valid(&bad) == 0);
     bad = s;
     bad.wheel_diameter_mm = 0;
-    ck_true("[1] 轮径=0 不合法", fixp_scale_is_valid(&bad) == 0);
+    ck_true("[1] wheel diameter=0 is invalid", fixp_scale_is_valid(&bad) == 0);
     bad = s;
     bad.period_ms = 0;
-    ck_true("[1] 窗口=0 不合法", fixp_scale_is_valid(&bad) == 0);
+    ck_true("[1] window=0 is invalid", fixp_scale_is_valid(&bad) == 0);
 }
 
 static void test_counts_per_m_derivation(void)
@@ -103,50 +103,50 @@ static void test_counts_per_m_derivation(void)
     int32_t c56;
     int32_t c_err;
 
-    printf("[2] ★ counts/m 推导（全项目唯一的常数来源）\n");
+    printf("[2] ★ counts/m derivation (the only source of this constant)\n");
 
-    /* 44 counts/电机转（11 PPR × 4 倍频） */
+    /* 44 counts per motor revolution (11 PPR x 4 quadrature) */
     c60 = fixp_counts_per_m_from_params(44, 60, 80);
     c56 = fixp_counts_per_m_from_params(44, 56, 80);
 
-    printf("  [info] 1:60  -> 44 × 60 = 2640 counts/轮转；2640 ÷ 0.2513274 m = 10504.2 -> 接口给 %ld\n",
+    printf("  [info] 1:60  -> 44 x 60 = 2640 counts/turn; 2640 / 0.2513274 m = 10504.2 -> API returns %ld\n",
            (long)c60);
-    printf("  [info] 1:56  -> 44 × 56 = 2464 counts/轮转；2464 ÷ 0.2513274 m =  9804.6 -> 接口给 %ld\n",
+    printf("  [info] 1:56  -> 44 x 56 = 2464 counts/turn; 2464 / 0.2513274 m =  9804.6 -> API returns %ld\n",
            (long)c56);
-    printf("  [info] 两者相差 %.1f%%，名义值取 1:60 的 10505，实车必须标定\n",
+    printf("  [info] they differ by %.1f%%; nominal value is 10505 from 1:60, calibrate on the real vehicle\n",
            (double)(c60 - c56) * 100.0 / (double)c60);
 
-    ck_i32("[2] 1:60 的精确推导结果 = 10504", c60, 10504);
-    ck_i32("[2] 1:56 的精确推导结果 = 9804", c56, 9804);
-    ck_true("[2] 与名义值 10505 只差 1（0.01%）", iabs64((int64_t)c60 - 10505) <= 1);
-    ck_true("[2] 1:56 与名义值差约 7%",
+    ck_i32("[2] exact 1:60 derivation = 10504", c60, 10504);
+    ck_i32("[2] exact 1:56 derivation = 9804", c56, 9804);
+    ck_true("[2] only 1 off the nominal 10505 (0.01%)", iabs64((int64_t)c60 - 10505) <= 1);
+    ck_true("[2] 1:56 is about 7 percent off the nominal value",
             iabs64((int64_t)c56 - 10505) * 100 >= 10505 * 6);
 
-    printf("  [info] 注：文档里出现过 9805/9806，是用真 π 而非 355/113 时的取整差异，\n");
-    printf("         差异 < 0.02%%，对里程计无实际影响，以 10505 为项目名义值。\n");
+    printf("  [info] note: 9805/9806 appear in the docs; they differ only by rounding with real pi vs 355/113,\n");
+    printf("         difference < 0.02%%, no practical effect on odometry; 10505 is the project nominal.\n");
 
     c_err = fixp_counts_per_m_from_params(0, 60, 80);
-    ck_i32("[2] counts_per_motor_rev=0 返回 0", c_err, 0);
-    ck_i32("[2] gear=0 返回 0", fixp_counts_per_m_from_params(44, 0, 80), 0);
-    ck_i32("[2] 轮径=0 返回 0", fixp_counts_per_m_from_params(44, 60, 0), 0);
-    ck_i32("[2] 负数返回 0", fixp_counts_per_m_from_params(-44, 60, 80), 0);
+    ck_i32("[2] counts_per_motor_rev=0 returns 0", c_err, 0);
+    ck_i32("[2] gear=0 returns 0", fixp_counts_per_m_from_params(44, 0, 80), 0);
+    ck_i32("[2] wheel diameter=0 returns 0", fixp_counts_per_m_from_params(44, 60, 0), 0);
+    ck_i32("[2] negative returns 0", fixp_counts_per_m_from_params(-44, 60, 80), 0);
 }
 
 static void test_velocity_conversion(void)
 {
     fixp_scale_t s = fixp_default_scale();
 
-    printf("[3] 速度双向换算（对称四舍五入）\n");
+    printf("[3] Bidirectional speed conversion (symmetric rounding)\n");
 
-    /* 100 mm/s 走一个 20 ms 窗口 = 2 mm = 21.01 counts -> 21 */
-    ck_i32("[3] 100 mm/s -> 21 counts/窗口", fixp_mm_s_to_counts(&s, 100), 21);
+    /* 100 mm/s over one 20 ms window = 2 mm = 21.01 counts -> 21 */
+    ck_i32("[3] 100 mm/s -> 21 counts/window", fixp_mm_s_to_counts(&s, 100), 21);
     ck_i32("[3] 21 counts -> 100 mm/s", fixp_counts_to_mm_s(&s, 21), 100);
-    ck_i32("[3] 零速 <-> 零计数", fixp_mm_s_to_counts(&s, 0), 0);
-    ck_i32("[3] 零计数 -> 零速", fixp_counts_to_mm_s(&s, 0), 0);
+    ck_i32("[3] zero speed <-> zero counts", fixp_mm_s_to_counts(&s, 0), 0);
+    ck_i32("[3] zero counts -> zero speed", fixp_counts_to_mm_s(&s, 0), 0);
 
-    /* 负值必须与正值严格对称，否则长期会累出系统性偏差 */
-    ck_i32("[3] -100 mm/s 对称", fixp_mm_s_to_counts(&s, -100), -21);
-    ck_i32("[3] -21 counts 对称", fixp_counts_to_mm_s(&s, -21), -100);
+    /* negative values must mirror positive ones exactly, else a systematic bias accumulates */
+    ck_i32("[3] -100 mm/s is symmetric", fixp_mm_s_to_counts(&s, -100), -21);
+    ck_i32("[3] -21 counts is symmetric", fixp_counts_to_mm_s(&s, -21), -100);
     ck_i32("[3] 2000 mm/s -> 420 counts", fixp_mm_s_to_counts(&s, 2000), 420);
     ck_i32("[3] 420 counts -> 1999 mm/s", fixp_counts_to_mm_s(&s, 420), 1999);
 
@@ -158,7 +158,7 @@ static void test_velocity_conversion(void)
                 symmetric = 0;
             }
         }
-        ck_true("[3] 全量程正负对称", symmetric != 0);
+        ck_true("[3] symmetric over the full range", symmetric != 0);
     }
 }
 
@@ -167,21 +167,21 @@ static void test_single_count_step(void)
     fixp_scale_t s = fixp_default_scale();
     int32_t one;
 
-    printf("[4] 单计数台阶（速度反馈的分辨率下限）\n");
+    printf("[4] Single-count step (resolution floor of speed feedback)\n");
 
     one = fixp_counts_to_mm_s(&s, 1);
-    printf("  [info] 1 count / 20 ms = 1000 ÷ (10505 × 0.02) = 4.7596 mm/s；整数接口给 %ld mm/s\n",
+    printf("  [info] 1 count / 20 ms = 1000 / (10505 x 0.02) = 4.7596 mm/s; integer API returns %ld mm/s\n",
            (long)one);
-    printf("  [info] 反向：1 count 对应轮子走了 0.09519 mm\n");
-    ck_i32("[4] 1 count -> 4.76 mm/s（取整后 5）", one, 5);
+    printf("  [info] reverse: 1 count means the wheel moved 0.09519 mm\n");
+    ck_i32("[4] 1 count -> 4.76 mm/s (rounds to 5)", one, 5);
 
-    /* 台阶去量化：真实 102 清不到整数格点上 */
-    printf("  [info] 真实 102 mm/s：单窗口量化成 %ld counts -> 回算 %ld mm/s（误差 %ld）\n",
+    /* de-quantizing the step: a true 102 mm/s never lands on an integer grid point */
+    printf("  [info] true 102 mm/s: one window quantizes to %ld counts -> back to %ld mm/s (error %ld)\n",
            (long)fixp_mm_s_to_counts(&s, 102),
            (long)fixp_counts_to_mm_s(&s, fixp_mm_s_to_counts(&s, 102)),
            (long)((int64_t)fixp_counts_to_mm_s(&s, fixp_mm_s_to_counts(&s, 102)) - 102));
-    ck_i32("[4] 102 mm/s 单窗口 -> 21 counts", fixp_mm_s_to_counts(&s, 102), 21);
-    ck_i32("[4] 21 counts 回算只有 100 mm/s（少 2）",
+    ck_i32("[4] 102 mm/s single window -> 21 counts", fixp_mm_s_to_counts(&s, 102), 21);
+    ck_i32("[4] 21 counts converts back to only 100 mm/s (2 short)",
            fixp_counts_to_mm_s(&s, 21), 100);
 }
 
@@ -191,32 +191,32 @@ static void test_multi_window_average(void)
     int32_t single;
     int32_t average;
 
-    printf("[5] ★ 多窗口累加降量化噪声\n");
+    printf("[5] ★ Multi-window accumulation lowers quantization noise\n");
 
-    /* 10 个窗口（200 ms）的计数和是 214，一次换算 */
-    single  = fixp_counts_to_mm_s(&s, 21);           /* 单个窗口只能这样 */
-    average = fixp_counts_sum_to_mm_s(&s, 214, 10);  /* 10 个窗口累加 */
+    /* 10 windows (200 ms) hold 214 counts in total; convert once */
+    single  = fixp_counts_to_mm_s(&s, 21);           /* a single window can only do this */
+    average = fixp_counts_sum_to_mm_s(&s, 214, 10);  /* accumulate 10 windows */
 
-    printf("  [info] 真实 102 mm/s：\n");
-    printf("         单窗口 21 counts -> %ld mm/s（误差 %ld）\n",
+    printf("  [info] true 102 mm/s:\n");
+    printf("         single window 21 counts -> %ld mm/s (error %ld)\n",
            (long)single, (long)((int64_t)single - 102));
-    printf("         10 窗口 214 counts -> %ld mm/s（误差 %ld）\n",
+    printf("         10 windows 214 counts -> %ld mm/s (error %ld)\n",
            (long)average, (long)((int64_t)average - 102));
 
-    ck_i32("[5] 10 窗口累加 -> 102 mm/s（精确）", average, 102);
-    ck_true("[5] 累加后的误差严格小于单窗口",
+    ck_i32("[5] 10-window sum -> 102 mm/s (exact)", average, 102);
+    ck_true("[5] accumulated error is strictly smaller than single-window",
             iabs64((int64_t)average - 102) < iabs64((int64_t)single - 102));
 
-    /* periods = 1 必须与单窗口完全等价（不引入额外取整） */
-    ck_i32("[5] periods=1 等价于单窗口",
+    /* periods = 1 must be exactly equivalent to a single window (no extra rounding) */
+    ck_i32("[5] periods=1 is equivalent to a single window",
            fixp_counts_sum_to_mm_s(&s, 21, 1), fixp_counts_to_mm_s(&s, 21));
 
-    /* 多窗口的整数结果必须落在单窗口结果的合理邻域内 */
-    ck_i64("[5] 累加结果与单窗口结果相差 <= 5%",
+    /* the multi-window integer result must stay near the single-window result */
+    ck_i64("[5] sum result is within 5 percent of the single-window result",
            (int64_t)average, (int64_t)single, 5);
 
-    ck_i32("[5] periods=0 返回 0", fixp_counts_sum_to_mm_s(&s, 214, 0), 0);
-    ck_i32("[5] periods<0 返回 0", fixp_counts_sum_to_mm_s(&s, 214, -3), 0);
+    ck_i32("[5] periods=0 returns 0", fixp_counts_sum_to_mm_s(&s, 214, 0), 0);
+    ck_i32("[5] periods<0 returns 0", fixp_counts_sum_to_mm_s(&s, 214, -3), 0);
 
     {
         int i;
@@ -229,7 +229,7 @@ static void test_multi_window_average(void)
             }
             prev = now;
         }
-        ck_true("[5] 关于 counts_sum 单调不减", monotonic != 0);
+        ck_true("[5] monotonic non-decreasing in counts_sum", monotonic != 0);
     }
 }
 
@@ -237,13 +237,13 @@ static void test_distance(void)
 {
     fixp_scale_t s = fixp_default_scale();
 
-    printf("[6] 累计里程换算与往返自洽\n");
+    printf("[6] Accumulated distance conversion and round-trip consistency\n");
 
     ck_i64("[6] 10505 counts -> 1000 mm", fixp_counts_to_mm(&s, 10505), 1000, 0);
     ck_i64("[6] 1000 mm -> 10505 counts", fixp_mm_to_counts(&s, 1000), 10505, 0);
-    ck_i64("[6] 一圈 2640 counts -> 251 mm", fixp_counts_to_mm(&s, 2640), 251, 0);
+    ck_i64("[6] one turn 2640 counts -> 251 mm", fixp_counts_to_mm(&s, 2640), 251, 0);
     ck_i64("[6] 100 mm -> 1051 counts", fixp_mm_to_counts(&s, 100), 1051, 0);
-    ck_i64("[6] 负值对称：-10505 counts -> -1000 mm",
+    ck_i64("[6] negative is symmetric: -10505 counts -> -1000 mm",
            fixp_counts_to_mm(&s, -10505), -1000, 0);
 
     {
@@ -256,13 +256,13 @@ static void test_distance(void)
                 round_trip_ok = 0;
             }
         }
-        ck_true("[6] mm -> counts -> mm 全程往返误差 <= 1 mm", round_trip_ok != 0);
+        ck_true("[6] mm -> counts -> mm round trip within 1 mm", round_trip_ok != 0);
     }
 
     {
-        /* 1 公里：10505 × 1000 = 10,505,000 counts */
+        /* 1 km: 10505 x 1000 = 10,505,000 counts */
         int64_t km_counts = 10505000;
-        ck_i64("[6] 1 km 对应 10,505,000 counts -> 1,000,000 mm",
+        ck_i64("[6] 1 km is 10,505,000 counts -> 1,000,000 mm",
                fixp_counts_to_mm(&s, km_counts), 1000000, 0);
     }
 }
@@ -272,26 +272,26 @@ static void test_overflow_guard(void)
     fixp_scale_t s = fixp_default_scale();
     int64_t big;
 
-    printf("[7] 大数值不溢出（clamp 保护）\n");
+    printf("[7] Large values do not overflow (clamp protection)\n");
 
-    /* 夹到 9e12 后 ×1000 = 9e15，仍在 int64 内 */
+    /* clamped to 9e12, x1000 = 9e15, still inside int64 */
     big = fixp_counts_to_mm(&s, 9223372036854775807LL);
-    printf("  [info] INT64_MAX counts 被夹住后 -> %lld mm（没有 UB、没有负溢出）\n",
+    printf("  [info] INT64_MAX counts after clamping -> %lld mm (no UB, no negative overflow)\n",
            (long long)big);
-    ck_true("[7] INT64_MAX 不产生负值", big > 0);
-    ck_true("[7] INT64_MAX 结果合理（8.5e11 mm 量级）",
+    ck_true("[7] INT64_MAX produces no negative value", big > 0);
+    ck_true("[7] INT64_MAX result is sane (order 8.5e11 mm)",
             big > 800000000000LL && big < 900000000000LL);
 
     big = fixp_counts_to_mm(&s, -9223372036854775807LL);
-    ck_true("[7] INT64_MIN 不产生正值", big < 0);
-    ck_true("[7] INT64_MIN 与 INT64_MAX 对称",
+    ck_true("[7] INT64_MIN produces no positive value", big < 0);
+    ck_true("[7] INT64_MIN mirrors INT64_MAX",
             iabs64(big + fixp_counts_to_mm(&s, 9223372036854775807LL)) <= 1);
 
-    ck_true("[7] mm_to_counts 大值不崩",
+    ck_true("[7] mm_to_counts does not crash on large values",
             fixp_mm_to_counts(&s, 9223372036854775807LL) > 0);
 
-    /* 距离换算用 int64 累计，长时间运行不溢出 */
-    ck_i64("[7] 100 km 累计仍精确",
+    /* distance uses int64 accumulation; long runs do not overflow */
+    ck_i64("[7] 100 km accumulation stays exact",
            fixp_counts_to_mm(&s, 1050500000LL), 100000000, 0);
 }
 
@@ -300,29 +300,29 @@ static void test_counts_per_turn_selfcheck(void)
     fixp_scale_t s = fixp_default_scale();
     int64_t per_turn;
 
-    printf("[8] 一圈计数自检（必须对上 44 × 60 = 2640）\n");
+    printf("[8] One-turn count self-check (must match 44 x 60 = 2640)\n");
 
     per_turn = fixp_counts_per_wheel_turn(&s);
-    printf("  [info] counts/轮转 = 10505 × π × 80 ÷ 1000 = %.1f -> %lld\n",
+    printf("  [info] counts/turn = 10505 x pi x 80 / 1000 = %.1f -> %lld\n",
            10505.0 * 3.14159265358979 * 80.0 / 1000.0, (long long)per_turn);
 
-    ck_i64("[8] 一圈 = 2640 counts（= 11 PPR × 4 倍频 × 60）", per_turn, 2640, 0);
-    ck_true("[8] 与 1:60 的前提自洽", per_turn == 44LL * 60LL);
+    ck_i64("[8] one turn = 2640 counts (= 11 PPR x 4 quadrature x 60)", per_turn, 2640, 0);
+    ck_true("[8] consistent with the 1:60 premise", per_turn == 44LL * 60LL);
 }
 
 static void test_omega(void)
 {
-    printf("[9] 一维角速度换算\n");
+    printf("[9] One-dimensional angular velocity conversion\n");
 
-    ck_i32("[9] 500 mm/s ÷ 300 mm -> 1667 mrad/s",
+    ck_i32("[9] 500 mm/s / 300 mm -> 1667 mrad/s",
            fixp_wheel_mm_s_to_omega_mrad_s(500, 300), 1667);
-    ck_i32("[9] 负值对称",
+    ck_i32("[9] negative is symmetric",
            fixp_wheel_mm_s_to_omega_mrad_s(-500, 300), -1667);
-    ck_i32("[9] 零速 -> 0", fixp_wheel_mm_s_to_omega_mrad_s(0, 300), 0);
-    ck_i32("[9] L=0 返回 0（不除零）", fixp_wheel_mm_s_to_omega_mrad_s(500, 0), 0);
-    ck_i32("[9] L<0 返回 0", fixp_wheel_mm_s_to_omega_mrad_s(500, -1), 0);
-    /* L = 300 时，正解 L 反推：ω=1000 mrad/s 对应轮速 300 mm/s */
-    ck_i32("[9] 300 mm/s ÷ 300 mm -> 1000 mrad/s",
+    ck_i32("[9] zero speed -> 0", fixp_wheel_mm_s_to_omega_mrad_s(0, 300), 0);
+    ck_i32("[9] L=0 returns 0 (no division by zero)", fixp_wheel_mm_s_to_omega_mrad_s(500, 0), 0);
+    ck_i32("[9] L<0 returns 0", fixp_wheel_mm_s_to_omega_mrad_s(500, -1), 0);
+    /* for L = 300, invert the forward map: omega=1000 mrad/s is wheel speed 300 mm/s */
+    ck_i32("[9] 300 mm/s / 300 mm -> 1000 mrad/s",
            fixp_wheel_mm_s_to_omega_mrad_s(300, 300), 1000);
 }
 
@@ -333,37 +333,37 @@ static void test_invalid_and_determinism(void)
     int i;
     int deterministic = 1;
 
-    printf("[10] 非法输入与确定性\n");
+    printf("[10] Invalid input and determinism\n");
 
     zero = s;
     zero.counts_per_m = 0;
 
-    ck_i32("[10] NULL -> 0（速度）", fixp_mm_s_to_counts(0, 100), 0);
-    ck_i32("[10] NULL -> 0（回算）", fixp_counts_to_mm_s(0, 100), 0);
-    ck_i32("[10] NULL -> 0（累加）", fixp_counts_sum_to_mm_s(0, 100, 2), 0);
-    ck_i64("[10] NULL -> 0（里程）", fixp_counts_to_mm(0, 100), 0, 0);
-    ck_i64("[10] NULL -> 0（反算）", fixp_mm_to_counts(0, 100), 0, 0);
-    ck_i64("[10] NULL -> 0（一圈）", fixp_counts_per_wheel_turn(0), 0, 0);
+    ck_i32("[10] NULL -> 0 (speed)", fixp_mm_s_to_counts(0, 100), 0);
+    ck_i32("[10] NULL -> 0 (convert back)", fixp_counts_to_mm_s(0, 100), 0);
+    ck_i32("[10] NULL -> 0 (accumulate)", fixp_counts_sum_to_mm_s(0, 100, 2), 0);
+    ck_i64("[10] NULL -> 0 (distance)", fixp_counts_to_mm(0, 100), 0, 0);
+    ck_i64("[10] NULL -> 0 (inverse)", fixp_mm_to_counts(0, 100), 0, 0);
+    ck_i64("[10] NULL -> 0 (one turn)", fixp_counts_per_wheel_turn(0), 0, 0);
 
     ck_i32("[10] counts_per_m=0 -> 0", fixp_mm_s_to_counts(&zero, 100), 0);
-    ck_i32("[10] counts_per_m=0 回算 -> 0", fixp_counts_to_mm_s(&zero, 100), 0);
-    ck_i32("[10] counts_per_m=0 累加 -> 0", fixp_counts_sum_to_mm_s(&zero, 100, 2), 0);
-    ck_i64("[10] counts_per_m=0 里程 -> 0", fixp_counts_to_mm(&zero, 100), 0, 0);
+    ck_i32("[10] counts_per_m=0 convert back -> 0", fixp_counts_to_mm_s(&zero, 100), 0);
+    ck_i32("[10] counts_per_m=0 accumulate -> 0", fixp_counts_sum_to_mm_s(&zero, 100, 2), 0);
+    ck_i64("[10] counts_per_m=0 distance -> 0", fixp_counts_to_mm(&zero, 100), 0, 0);
 
     {
         fixp_scale_t badp = s;
         badp.period_ms = 0;
         ck_i32("[10] period_ms=0 -> 0", fixp_mm_s_to_counts(&badp, 100), 0);
-        ck_i32("[10] period_ms=0 回算 -> 0", fixp_counts_to_mm_s(&badp, 100), 0);
+        ck_i32("[10] period_ms=0 convert back -> 0", fixp_counts_to_mm_s(&badp, 100), 0);
     }
 
-    /* 777 mm/s 走 20 ms = 15.54 mm = 163.25 counts -> 163 */
+    /* 777 mm/s over 20 ms = 15.54 mm = 163.25 counts -> 163 */
     for (i = 0; i < 1000; ++i) {
         if (fixp_mm_s_to_counts(&s, 777) != 163) {
             deterministic = 0;
         }
     }
-    ck_true("[10] 同一输入永远同一输出", deterministic != 0);
+    ck_true("[10] same input always gives the same output", deterministic != 0);
     ck_i32("[10] 777 mm/s -> 163 counts", fixp_mm_s_to_counts(&s, 777), 163);
     ck_i32("[10] 163 counts -> 776 mm/s", fixp_counts_to_mm_s(&s, 163), 776);
 }
@@ -372,7 +372,7 @@ static void test_invalid_and_determinism(void)
 
 int main(void)
 {
-    printf("=== 定点单位换算测试 ===\n");
+    printf("=== fixedpoint unit conversion tests ===\n");
 
     test_default_and_valid();
     test_counts_per_m_derivation();

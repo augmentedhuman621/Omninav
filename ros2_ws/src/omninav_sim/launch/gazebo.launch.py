@@ -1,14 +1,14 @@
-"""OmniNav Gazebo Classic 仿真启动文件。
+"""OmniNav Gazebo Classic simulation launch file.
 
-用法（Humble 环境）：
-  ros2 launch omninav_sim gazebo.launch.py                 # 带 Gazebo 图形界面
-  ros2 launch omninav_sim gazebo.launch.py gui:=false      # 无界面（远程/低配）
+Usage (Humble environment):
+  ros2 launch omninav_sim gazebo.launch.py                 # with the Gazebo GUI
+  ros2 launch omninav_sim gazebo.launch.py gui:=false      # headless (remote / low-spec)
   ros2 launch omninav_sim gazebo.launch.py world:=/path/to/xxx.world
 
-启动后：
-  /cmd_vel  -> planar_move 插件直接移动车体（全向）
-  /odom     -> 插件发布（odom 帧 -> base_link 的 TF 由插件发布）
-  /scan     -> 车顶 2D 雷达（360 线，10 Hz，0.12-8 m）
+After launch:
+  /cmd_vel  -> the planar_move plugin moves the robot body directly (omnidirectional)
+  /odom     -> published by the plugin (the odom frame -> base_link TF is published by the plugin)
+  /scan     -> roof-mounted 2D lidar (360 rays, 10 Hz, 0.12-8 m)
 """
 
 import os
@@ -74,16 +74,16 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'world',
             default_value=PathJoinSubstitution([pkg_share, 'worlds', 'omninav_warehouse.world']),
-            description='Gazebo world 文件路径'),
+            description='Path to the Gazebo world file'),
         DeclareLaunchArgument(
             'gui', default_value='true',
-            description='是否启动 Gazebo 图形界面'),
+            description='Whether to start the Gazebo GUI'),
         DeclareLaunchArgument(
             'use_sim_time', default_value='true',
-            description='使用仿真时间'),
+            description='Use simulation time'),
         DeclareLaunchArgument(
             'spawn_z', default_value='0.075',
-            description='车体 base_link 初始高度（轮半径 0.04 + 底盘离地 0.035）'),
+            description='Initial height of base_link (wheel radius 0.04 + chassis clearance 0.035)'),
         gzserver,
         gzclient,
         robot_state_publisher,

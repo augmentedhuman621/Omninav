@@ -1,51 +1,52 @@
 /*
- * odom.h — 圆弧积分里程计
+ * odom.h — arc-integration odometry
  * ---------------------------------------------------------------------------
  *
- * ★★ 本文件的函数签名由 11_接口契约.md §5.1 冻结，逐字照抄，不得改动。
- *    （`bridge-dev` 正等着按这套签名用 ctypes 调这几个符号。）
+ * ★★ The function signatures in this file are frozen by 11_interface_contract.md §5.1 —
+ *    copy them verbatim, do not change them. (`bridge-dev` is waiting to call these symbols
+ *    through ctypes using exactly these signatures.)
  *
- * 归属：位姿在树莓派侧算（契约 §3 的拍板），理由三条：
- *   1. 里程计参数（轮径 / 减速比）要反复标定，放 STM32 上意味着每次标定
- *      都要重烧固件。
- *   2. 圆弧积分是导航域的东西，不该混进硬实时的电机控制固件。
- *   3. firmware_core 本来就要求「三处共用」，编成共享库给树莓派加载
- *      ＝ 一份数学、零重复实现。
- *   所以 `E` 帧给的是**四轮累计里程（mm）**，不是位姿；取增量后在这里积分。
+ * Ownership: the pose is computed on the Raspberry Pi side (the decision of contract §3), for three reasons:
+ *   1. Odometry parameters (wheel diameter / gear ratio) are calibrated repeatedly; keeping them on the STM32
+ *      would mean reflashing the firmware for every calibration.
+ *   2. Arc integration belongs to the navigation domain and should not be mixed into hard-real-time motor-control firmware.
+ *   3. firmware_core is required to be "shared by three places" anyway; built as a shared library it is loaded by the Pi
+ *      = one copy of the math, zero duplicated implementations.
+ *   So the `E` frame carries **accumulated distance per wheel (mm)**, not a pose; the deltas are taken and integrated here.
  *
- * 设计约束（与 firmware_core 铁律一致）
- *   - 只 include <stdint.h> 与同目录自己的 "mecanum.h"。
- *   - 全整数零浮点、无动态内存、无全局可变状态、无递归。
- *   - 同样的输入序列 → 同样的输出序列（确定性），可在 STM32F103 与
- *     树莓派上得到逐位一致的结果。
+ * Design constraints (consistent with the firmware_core iron rules)
+ *   - Depends only on <stdint.h> and the sibling "mecanum.h" in this directory.
+ *   - All-integer zero floating-point, no dynamic memory, no global mutable state, no recursion.
+ *   - Same input sequence → same output sequence (determinism), giving bit-identical results on the STM32F103
+ *     and on the Raspberry Pi.
  *
- * 为什么必须用圆弧积分而不是欧拉积分
- *   欧拉写法是「把本步的机体位移直接加到世界坐标上」，等价于假设这一步
- *   里车头方向没变。当一步之内既有位移又有转角时，这个假设不成立：
- *   转得越多、步长越大，误差越大；原地自转时更糟 —— 编码器量化产生的
- *   一丁点横向位移，会因为「方向不跟着转」而被朝同一个世界方向累加，
- *   转满一圈后累出一个实实在在的位置漂移。
+ * Why arc integration is mandatory instead of Euler integration
+ *   The Euler form "add this step's body-frame displacement directly to the world coordinates" assumes that
+ *   the heading does not change during the step. When one step contains both displacement and rotation, that assumption fails:
+ *   the more rotation and the larger the step, the bigger the error; in-place rotation is worse — the tiny lateral
+ *   displacement produced by encoder quantization is accumulated toward the same world direction because "the direction does not rotate with it",
+ *   and after a full turn that adds up to a real position drift.
  *
- *   圆弧积分（本模块）把本步的机体位移按**本步中间航向 θ + Δθ/2** 旋转
- *   到世界系，并乘一个 sinc 因子 k = s(Δθ/2)/(Δθ/2)：
+ *   Arc integration (this module) rotates this step's body-frame displacement by the **mid-step heading θ + Δθ/2**
+ *   into the world frame, and multiplies by a sinc factor k = s(Δθ/2)/(Δθ/2):
  *
  *       ΔX = k · ( Δx·c(θm) − Δy·s(θm) )
  *       ΔY = k · ( Δx·s(θm) + Δy·c(θm) ),   θm = θ + Δθ/2
  *
- *   其中 s(·) 是正弦、c(·) 是余弦（函数名不写全，是因为 `check-purity`
- *   对源码做了整词禁用检查，注释里也不能出现那两个库函数名）。
+ *   Here s(·) is the sine and c(·) is the cosine (the names are not spelled out because `check-purity`
+ *   does a whole-word forbidden check over the sources, so those two library function names must not appear even in comments).
  *
- *   Δθ → 0 时 k → 1，公式退化为直线（所以不需要特判分支，只需要在
- *   |Δθ| 很小时把 k 直接取 1，避免整数域里 0/0）。
+ *   As Δθ → 0, k → 1 and the formula degenerates to a straight line (so no special-case branch is needed, only
+ *   forcing k = 1 when |Δθ| is very small, avoiding 0/0 in the integer domain).
  *
- * 单位与量纲的一个细节（照契约 §5.1 的数学提示）
- *   `mecanum_forward()` 是线性映射：把「四轮位移增量（mm）」喂进去，
- *   输出的 `vx_mm_s / vy_mm_s` 字段实际就是本步的 Δx_mm / Δy_mm，
- *   `omega_mrad_s` 字段实际就是本步的 Δθ_mrad。字段名带 _s 是历史命名，
- *   量纲要看输入 —— 这里输入的是增量，不是速率。
- *   ⇒ 同理 `twist_out` 写回的是**本步的机体增量**（mm/步、mrad/步），
- *     不是每秒速度。调用者要用速度就自己除以控制周期 dt。
- *     （契约冻结了签名里没有 dt，所以这里不能替你除。）
+ * One detail about units and dimensions (from the math note in contract §5.1)
+ *   `mecanum_forward()` is a linear map: feed it the "four-wheel displacement deltas (mm)" and
+ *   the `vx_mm_s / vy_mm_s` fields of the output are actually this step's Δx_mm / Δy_mm,
+ *   and the `omega_mrad_s` field is actually this step's Δθ_mrad. The _s suffix in the field names is historical naming;
+ *   read the dimension from the input — here the input is a delta, not a rate.
+ *   ⇒ Likewise `twist_out` returns **this step's body-frame delta** (mm/step, mrad/step),
+ *     not a per-second velocity. A caller that wants velocity must divide by the control period dt itself.
+ *     (The contract froze the signature without dt, so this file cannot do the division for you.)
  */
 
 #ifndef ODOM_H
@@ -59,22 +60,22 @@ extern "C" {
 #endif
 
 /*
- * 发布给 ROS2 的位姿。theta 归一化，适合长期运行不溢出。
+ * Pose published to ROS2. theta is normalized, safe for long runs without overflow.
  *
- * ★ theta_mrad 的回绕量必须是一**整圈**，否则归一化不再是角度等价变换：
- *   pose_theta − total_theta 恒为 6284 mrad（= 2 × 3142）的整数倍。
- *   这是测试 [5] 的判据 b 在验的恒等式，也是「能不能直接当 yaw 用」的依据。
- *   取整圈 6284 而真值是 2π = 6283.185，每回绕一次偏 0.815 mrad ≈ 0.047°，
- *   是 mrad 整数化本身的下限。（历史上用过 180000，那不是整圈，越过时
- *   航向会跳 106.48°，属真 bug，已在契约 §5.1 定为 3142。）
+ * ★ The wrap amount of theta_mrad must be **one full turn**, otherwise the normalization is no longer an
+ *   angle-equivalence transform: pose_theta − total_theta is always a multiple of 6284 mrad (= 2 × 3142).
+ *   This is the identity checked by criterion b of test [5], and the basis for "can it be used as yaw directly".
+ *   Using a full turn of 6284 while the true value is 2π = 6283.185 loses 0.815 mrad ≈ 0.047° per wrap,
+ *   which is the floor of integer mrad representation itself. (180000 was used historically; that is not a full turn,
+ *   and the heading jumps 106.48° when crossing it — a real bug, fixed to 3142 by contract §5.1.)
  */
 typedef struct {
-    int64_t x_mm;        /* 累计 x，mm */
-    int64_t y_mm;        /* 累计 y，mm */
-    int32_t theta_mrad;  /* 归一化到 (-3142, 3142]，可直接当 yaw 用 */
+    int64_t x_mm;        /* accumulated x, mm */
+    int64_t y_mm;        /* accumulated y, mm */
+    int32_t theta_mrad;  /* normalized to (-3142, 3142], usable directly as yaw */
 } odom_pose_t;
 
-/* 不做角度归一化的累计量，供调试与长时间统计。 */
+/* Accumulated quantities without angle normalization, for debugging and long-run statistics. */
 typedef struct {
     int64_t x_mm;
     int64_t y_mm;
@@ -84,15 +85,16 @@ typedef struct {
 void odom_reset(odom_pose_t *pose, odom_total_t *total);
 
 /*
- * 用「四轮累计里程（mm，顺序 FL,FR,RL,RR）」的增量更新位姿。
- *   - 圆弧积分（不是欧拉积分）：Δθ != 0 时沿圆弧推进，
- *     否则原地自转时位置会假漂——这是里程计最典型的错法。
- *   - 返回 1 = 已更新；0 = 输入不合法（几何无效 / 指针为空），位姿保持不变。
- *   - twist_out 允许为 NULL；非 NULL 时写入**本步的机体位移增量**
- *     （mm/步、mrad/步），**不是速率** —— 本签名没有 dt 参数，原理上产不出
- *     「每秒」量纲。调用者要速度就自己除以协议名义周期 0.020 s。
- *     （契约 §5.1 冻结此语义；`bridge-dev` 的 check_core.py 按「增量」写的。）
- *   - 纯函数式、无全局状态、无浮点、无动态内存。
+ * Update the pose from the deltas of "accumulated distance per wheel (mm, order FL,FR,RL,RR)".
+ *   - Arc integration (not Euler): advance along the arc when Δθ != 0; otherwise the position
+ *     drifts spuriously during in-place rotation — the most typical odometry mistake.
+ *   - Returns 1 = updated; 0 = invalid input (invalid geometry / null pointer), pose left unchanged.
+ *   - twist_out may be NULL; when non-NULL it receives **this step's body-frame displacement delta**
+ *     (mm/step, mrad/step), **not a rate** — this signature has no dt argument, so it cannot produce
+ *     a per-second dimension by construction. A caller that wants velocity must divide by the nominal
+ *     protocol period 0.020 s itself.
+ *     (Contract §5.1 froze this semantics; `bridge-dev`'s check_core.py is written against "delta".)
+ *   - Pure functional, no global state, no floating-point, no dynamic memory.
  */
 int odom_update(odom_pose_t *pose, odom_total_t *total,
                 const mecanum_geom_t *g,

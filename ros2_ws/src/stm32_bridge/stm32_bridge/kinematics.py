@@ -1,20 +1,20 @@
-"""stm32_bridge.kinematics —— 用 ``ctypes`` 加载 ``firmware_core`` 编出的 ``libomninav_core.so``。
+"""stm32_bridge.kinematics — loads ``libomninav_core.so`` built from ``firmware_core`` through ``ctypes``.
 
-★★★ 铁律（``11_接口契约.md`` §3 末 / §5.3 + T2 任务卡「软依赖」）
+★★★ Iron rule (end of ``11_interface_contract.md`` §3 / §5.3 + the T2 task card "soft dependency")
 
-    麦轮正逆解与里程计圆弧积分**只能有一份实现**，就在 ``firmware_core`` 的 C 代码里
-    （``mecanum.c`` / ``odom.c``）。本文件**不做任何数学**，只把 C 符号包成 Python 函数。
-    找不到 ``.so`` 时**必须抛清晰异常**，**绝不许**用 Python 自己算一遍 ——
-    那就是第二份实现，迟早与 C 版分叉，而且分叉的那一天没有任何测试会报警。
+    Mecanum forward/inverse kinematics and arc-integration odometry may have **exactly one implementation**, in the C code of ``firmware_core``
+    (``mecanum.c`` / ``odom.c``). This file **does no math at all**; it only wraps C symbols as Python functions.
+    When the ``.so`` cannot be found it **must raise a clear exception**, and must **never** reimplement the math in Python —
+    that would be a second implementation, bound to diverge from the C version eventually, and no test would warn on the day it diverges.
 
-``.so`` 查找顺序（契约 §5.3，**冻结**，第一个存在的就用）：
+``.so`` lookup order (contract §5.3, **frozen**; the first existing path wins):
 
-    1. 环境变量 ``OMNINAV_CORE_SO``（便于在笔记本 / WSL 上开发时指向别处）
-    2. ``<本包目录>/lib/libomninav_core.so``
-    3. ``/opt/omninav/lib/libomninav_core.so``   <- ``pi_setup/install_core.sh`` 负责装到这里
+    1. Environment variable ``OMNINAV_CORE_SO`` (handy for pointing elsewhere while developing on a laptop / WSL)
+    2. ``<package dir>/lib/libomninav_core.so``
+    3. ``/opt/omninav/lib/libomninav_core.so``   <- installed here by ``pi_setup/install_core.sh``
 
-都不存在 -> :class:`CoreLibraryNotFound`；``.so`` 存在但少符号 -> :class:`CoreSymbolMissing`。
-两种都是**明确报错、不降级**。
+If none exist -> :class:`CoreLibraryNotFound`; if the ``.so`` exists but lacks symbols -> :class:`CoreSymbolMissing`.
+Both are **explicit errors, never a silent fallback**.
 """
 
 from __future__ import annotations
@@ -44,19 +44,19 @@ __all__ = [
     "reset_default_core",
 ]
 
-#: 轮数（FL, FR, RL, RR）。
+#: Number of wheels (FL, FR, RL, RR).
 WHEEL_COUNT = 4
 
-#: 契约 §5.2 冻结的产物名。
+#: Artifact name frozen by contract §5.2.
 SONAME = "libomninav_core.so"
 
-#: 契约 §5.3 第 1 条：开发时用环境变量覆盖。
+#: Contract §5.3 item 1: override with an environment variable during development.
 CORE_SO_ENV = "OMNINAV_CORE_SO"
 
-#: 契约 §5.3 第 3 条：``pi_setup/install_core.sh`` 装到的地方。
+#: Contract §5.3 item 3: where ``pi_setup/install_core.sh`` installs it.
 SYSTEM_CORE_SO = "/opt/omninav/lib/" + SONAME
 
-#: 契约 §5.2 冻结的「必须导出的符号」。
+#: The "must export" symbols frozen by contract §5.2.
 REQUIRED_SYMBOLS: Tuple[str, ...] = (
     "mecanum_forward",
     "mecanum_inverse",
@@ -67,29 +67,29 @@ REQUIRED_SYMBOLS: Tuple[str, ...] = (
     "odom_reset",
 )
 
-#: ``<本包目录>/lib/<SONAME>``（契约 §5.3 第 2 条）。
+#: ``<package dir>/lib/<SONAME>`` (contract §5.3 item 2).
 PACKAGE_LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib")
 
 
 class CoreLibraryError(RuntimeError):
-    """``libomninav_core.so`` 相关的任何错误 —— 一律往上抛，绝不吞掉。"""
+    """Any ``libomninav_core.so``-related error — always propagated, never swallowed."""
 
 
 class CoreLibraryNotFound(CoreLibraryError):
-    """三个候选路径都不存在。"""
+    """None of the three candidate paths exists."""
 
 
 class CoreSymbolMissing(CoreLibraryError):
-    """``.so`` 加载成功了，但契约要求的符号没全导出。"""
+    """The ``.so`` loaded, but not all contract-required symbols are exported."""
 
 
 # --------------------------------------------------------------------------
-# ctypes 结构体（字段顺序 / 类型必须与 firmware_core 的头文件逐字对应）
+# ctypes structs (field order / types must match the firmware_core headers verbatim)
 # --------------------------------------------------------------------------
 
 
 class MecanumGeom(ctypes.Structure):
-    """对应 C 的 ``mecanum_geom_t``（``firmware_core/include/mecanum.h``）。"""
+    """Mirrors C ``mecanum_geom_t`` (``firmware_core/include/mecanum.h``)."""
 
     _fields_ = [
         ("half_wheelbase_mm", ctypes.c_int32),
@@ -100,7 +100,7 @@ class MecanumGeom(ctypes.Structure):
 
 
 class MecanumTwist(ctypes.Structure):
-    """对应 C 的 ``mecanum_twist_t``。单位 mm/s、mrad/s。"""
+    """Mirrors C ``mecanum_twist_t``. Units mm/s, mrad/s."""
 
     _fields_ = [
         ("vx_mm_s", ctypes.c_int32),
@@ -110,17 +110,17 @@ class MecanumTwist(ctypes.Structure):
 
 
 class MecanumWheels(ctypes.Structure):
-    """对应 C 的 ``mecanum_wheels_t``：四轮线速度，顺序 FL, FR, RL, RR。"""
+    """Mirrors C ``mecanum_wheels_t``: four wheel linear velocities, order FL, FR, RL, RR."""
 
     _fields_ = [("wheel_mm_s", ctypes.c_int32 * WHEEL_COUNT)]
 
 
 class OdomPose(ctypes.Structure):
-    """对应 C 的 ``odom_pose_t``：``{int64_t x_mm, int64_t y_mm, int32_t theta_mrad}``。
+    """Mirrors C ``odom_pose_t``: ``{int64_t x_mm, int64_t y_mm, int32_t theta_mrad}``.
 
-    ★ 注意尾部 padding：C 侧按自然对齐算出来是 **24 字节**（4 字节尾填充），
-    不是 20。``ctypes.Structure`` 会按同样的 ABI 规则补齐，所以按字段原样声明就是对的；
-    但在别处**不要**假设 ``sizeof(OdomPose) == 20``。
+    ★ Note the trailing padding: with natural alignment the C side is **24 bytes** (4 bytes of tail padding),
+    not 20. ``ctypes.Structure`` pads according to the same ABI rules, so declaring the fields as-is is correct;
+    but elsewhere **do not** assume ``sizeof(OdomPose) == 20``.
     """
 
     _fields_ = [
@@ -131,7 +131,7 @@ class OdomPose(ctypes.Structure):
 
 
 class OdomTotal(ctypes.Structure):
-    """对应 C 的 ``odom_total_t``：不做角度归一化的累计量。"""
+    """Mirrors C ``odom_total_t``: accumulated quantities without angle normalization."""
 
     _fields_ = [
         ("x_mm", ctypes.c_int64),
@@ -141,22 +141,22 @@ class OdomTotal(ctypes.Structure):
 
 
 # --------------------------------------------------------------------------
-# 库查找
+# Library lookup
 # --------------------------------------------------------------------------
 
 
 def _normalize_path(raw: str) -> str:
-    """展开 ``~`` 与 ``$VAR``，再取绝对路径。
+    """Expand ``~`` and ``$VAR``, then return an absolute path.
 
-    ★ 契约 §5.3 的错误提示会劝人写 ``OMNINAV_CORE_SO=~/omninav/lib/libomninav_core.so``，
-      而 ``os.path.isfile()`` **不认** ``~``（它只是个普通字符）。不展开的话，
-      照着提示做反而会拿到"找不到 .so"。
+    ★ The contract §5.3 error hint tells people to write ``OMNINAV_CORE_SO=~/omninav/lib/libomninav_core.so``,
+      but ``os.path.isfile()`` **does not understand** ``~`` (it is just an ordinary character). Without expansion,
+      following the hint would actually produce "cannot find the .so".
     """
     return os.path.abspath(os.path.expanduser(os.path.expandvars(raw)))
 
 
 def candidate_paths() -> List[str]:
-    """按契约 §5.3 的顺序返回候选路径（第 1 条做 ~ / $VAR 展开）。"""
+    """Return the candidate paths in contract §5.3 order (item 1 expands ~ / $VAR)."""
     paths: List[str] = []
     override = os.environ.get(CORE_SO_ENV, "").strip()
     if override:
@@ -167,23 +167,23 @@ def candidate_paths() -> List[str]:
 
 
 def find_library() -> str:
-    """返回第一个存在的候选路径；都不存在则抛 :class:`CoreLibraryNotFound`。"""
+    """Return the first existing candidate path; raise :class:`CoreLibraryNotFound` if none exists."""
     tried = candidate_paths()
     for path in tried:
         if os.path.isfile(path):
             return path
     raise CoreLibraryNotFound(
-        "找不到 %s。按契约 §5.3 的顺序找过这些路径：\n  %s\n"
-        "修法：\n"
-        "  * 树莓派：让 pi_setup/install_core.sh 把 .so 装到 %s\n"
-        "  * 笔记本 / WSL 开发：%s=/绝对路径/%s\n"
-        "  * 或者先在 firmware_core/ 里跑 `make lib` 把 .so 编出来"
+        "Cannot find %s. Looked at these paths in contract §5.3 order:\n  %s\n"
+        "How to fix:\n"
+        "  * Raspberry Pi: let pi_setup/install_core.sh install the .so to %s\n"
+        "  * Laptop / WSL development: %s=/absolute/path/%s\n"
+        "  * Or build the .so first by running `make lib` in firmware_core/"
         % (SONAME, "\n  ".join(tried), SYSTEM_CORE_SO, CORE_SO_ENV, SONAME)
     )
 
 
 class Core:
-    """``libomninav_core.so`` 的 Python 门面。**不含任何数学**。"""
+    """Python facade for ``libomninav_core.so``. **Contains no math**."""
 
     def __init__(self, path: Optional[str] = None) -> None:
         self.path = path or find_library()
@@ -191,20 +191,20 @@ class Core:
             self._lib = ctypes.CDLL(self.path)
         except OSError as exc:
             raise CoreLibraryError(
-                "ctypes 加载 %s 失败：%s\n"
-                "常见原因：架构不符（x86_64 的 .so 不能给树莓派 aarch64 用；"
-                "树莓派上必须在树莓派本地 make lib）" % (self.path, exc)
+                "ctypes failed to load %s: %s\n"
+                "Common causes: architecture mismatch (an x86_64 .so cannot be used by the Raspberry Pi aarch64;"
+                "on the Pi you must run make lib locally on the Pi)" % (self.path, exc)
             ) from exc
         self._bind()
 
-    # -- 符号绑定 ---------------------------------------------------------
+    # -- Symbol binding ----------------------------------------------------
 
     def _bind(self) -> None:
         missing = [name for name in REQUIRED_SYMBOLS if not hasattr(self._lib, name)]
         if missing:
             raise CoreSymbolMissing(
-                "%s 缺少契约 §5.2 要求导出的符号：%s\n"
-                "（``make lib`` 必须用 -fPIC -shared 编，且不要把符号 static 掉）"
+                "%s is missing symbols required by contract §5.2: %s\n"
+                "(``make lib`` must be built with -fPIC -shared, and do not make the symbols static)"
                 % (self.path, ", ".join(missing))
             )
 
@@ -246,10 +246,10 @@ class Core:
             ctypes.POINTER(MecanumTwist),
         ]
 
-    # -- 高层封装 ---------------------------------------------------------
+    # -- High-level wrappers -----------------------------------------------
 
     def default_geom(self) -> MecanumGeom:
-        """C 侧默认几何（**几何与标定参数的唯一来源**，契约 §6）。"""
+        """C-side default geometry (**the single source of geometry and calibration parameters**, contract §6)."""
         return self._lib.mecanum_default_geom()
 
     def make_geom(
@@ -267,7 +267,7 @@ class Core:
         )
         if not self.geom_is_valid(geom):
             raise ValueError(
-                "几何参数不合法（mecanum_geom_is_valid 返回 0）："
+                "Invalid geometry (mecanum_geom_is_valid returned 0):"
                 "half_wheelbase_mm=%d half_track_mm=%d vy_polarity=%d omega_polarity=%d"
                 % (half_wheelbase_mm, half_track_mm, vy_polarity, omega_polarity)
             )
@@ -277,24 +277,24 @@ class Core:
         return bool(self._lib.mecanum_geom_is_valid(ctypes.byref(geom)))
 
     def l_mm(self, geom: MecanumGeom) -> int:
-        """``L = half_wheelbase_mm + half_track_mm``（由 C 算，不在 Python 里再算一遍）。"""
+        """``L = half_wheelbase_mm + half_track_mm`` (computed by C, not recomputed in Python)."""
         return int(self._lib.mecanum_l_mm(ctypes.byref(geom)))
 
     def forward(self, geom: MecanumGeom, wheels_mm_s: Sequence[int]) -> MecanumTwist:
-        """正解：四轮线速度（FL,FR,RL,RR）-> 机体速度。"""
+        """Forward kinematics: wheel linear velocities (FL,FR,RL,RR) -> body velocity."""
         wheels = MecanumWheels((ctypes.c_int32 * WHEEL_COUNT)(*_check_wheels(wheels_mm_s)))
         twist = MecanumTwist()
         self._lib.mecanum_forward(ctypes.byref(geom), ctypes.byref(wheels), ctypes.byref(twist))
         return twist
 
     def inverse(self, geom: MecanumGeom, twist: MecanumTwist) -> MecanumWheels:
-        """逆解：机体速度 -> 四轮线速度（FL,FR,RL,RR）。"""
+        """Inverse kinematics: body velocity -> wheel linear velocities (FL,FR,RL,RR)."""
         wheels = MecanumWheels()
         self._lib.mecanum_inverse(ctypes.byref(geom), ctypes.byref(twist), ctypes.byref(wheels))
         return wheels
 
     def odom_reset(self) -> Tuple[OdomPose, OdomTotal]:
-        """清零位姿与累计量，返回一对新的结构体给调用方持有。"""
+        """Reset pose and accumulated quantities; return a fresh pair of structs for the caller to own."""
         pose = OdomPose()
         total = OdomTotal()
         self._lib.odom_reset(ctypes.byref(pose), ctypes.byref(total))
@@ -309,11 +309,11 @@ class Core:
         d_prev: Sequence[int],
         twist_out: Optional[MecanumTwist] = None,
     ) -> Optional[MecanumTwist]:
-        """用四轮**累计里程**增量更新位姿（圆弧积分，在 C 里算）。
+        """Update the pose from the four-wheel **accumulated distance** increments (arc integration, computed in C).
 
-        :returns: 更新成功时返回本次的机体速度估计（mm/s、mrad/s）；
-                  C 返回 0（几何无效 / 指针为空）时返回 ``None``，**位姿保持不变**。
-                  ⇒ 调用方**不要**在这种情况下推进 ``d_prev``，否则会静默丢里程。
+        :returns: on success, the body velocity estimate for this step (mm/s, mrad/s);
+          returns ``None`` when C returns 0 (invalid geometry / null pointer), with the **pose left unchanged**.
+          ⇒ the caller must **not** advance ``d_prev`` in that case, otherwise odometry is silently lost.
         """
         now = (ctypes.c_int32 * WHEEL_COUNT)(*_check_wheels(d_now))
         prev = (ctypes.c_int32 * WHEEL_COUNT)(*_check_wheels(d_prev))
@@ -328,7 +328,7 @@ class Core:
         )
         return twist if ok else None
 
-    # -- 诊断 -------------------------------------------------------------
+    # -- Diagnostics -------------------------------------------------------
 
     def describe(self) -> str:
         return "%s (OdomPose=%d B, OdomTotal=%d B)" % (
@@ -340,26 +340,26 @@ class Core:
 
 def _check_wheels(values: Sequence[int]) -> Tuple[int, int, int, int]:
     if len(values) != WHEEL_COUNT:
-        raise ValueError("需要 %d 个轮值，拿到 %d 个" % (WHEEL_COUNT, len(values)))
+        raise ValueError("expected %d wheel values, got %d" % (WHEEL_COUNT, len(values)))
     out = []
     for index, value in enumerate(values):
         if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError("wheel[%d] 必须是 int，拿到 %r" % (index, type(value).__name__))
+            raise TypeError("wheel[%d] must be an int, got %r" % (index, type(value).__name__))
         if not -(2 ** 31) <= value <= 2 ** 31 - 1:
-            raise ValueError("wheel[%d]=%d 超出 int32" % (index, value))
+            raise ValueError("wheel[%d]=%d is outside int32" % (index, value))
         out.append(value)
     return (out[0], out[1], out[2], out[3])
 
 
 # --------------------------------------------------------------------------
-# 模块级默认实例（节点与工具脚本共用一份，避免重复 dlopen）
+# Module-level default instance (shared by the node and tool scripts to avoid repeated dlopen)
 # --------------------------------------------------------------------------
 
 _DEFAULT_CORE: Optional[Core] = None
 
 
 def default_core() -> Core:
-    """懒加载的默认 :class:`Core`。找不到 ``.so`` 时抛 :class:`CoreLibraryNotFound`。"""
+    """Lazily loaded default :class:`Core`. Raises :class:`CoreLibraryNotFound` when the ``.so`` is missing."""
     global _DEFAULT_CORE
     if _DEFAULT_CORE is None:
         _DEFAULT_CORE = Core()
@@ -367,6 +367,6 @@ def default_core() -> Core:
 
 
 def reset_default_core() -> None:
-    """丢掉缓存的默认实例（单测 / 换 ``OMNINAV_CORE_SO`` 后用）。"""
+    """Drop the cached default instance (for unit tests / after changing ``OMNINAV_CORE_SO``)."""
     global _DEFAULT_CORE
     _DEFAULT_CORE = None

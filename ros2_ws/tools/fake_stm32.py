@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
-"""假 STM32 —— 零硬件就能把串口桥的整条链路跑起来。
+"""Fake STM32 — run the whole serial-bridge chain with zero hardware.
 
-它做的事（照 ``11_接口契约.md`` §3 的帧格式）：
+What it does (following the frame format in ``11_interface_contract.md`` §3):
 
 ===  =========================================================================
- 收   ``V,<vx>,<vy>,<w>``  -> 记下来，并按 C 的 ``mecanum_inverse()`` 积分成四轮里程
- 收   ``M`` / ``P`` / ``S`` / ``reset`` -> 回 ``A,OK ...``；``S`` 把速度清零；``reset`` 清里程
- 发   ``E,<v1..v4>,<d1..d4>``  50 Hz，四个累计里程是**整数 mm**，d 只增（或只减）不重置
-     ↑ 每发一帧 E 就推进**固定 20 ms 步长**的里程（不按墙钟累加），与桥的归一化
-       周期（``11_接口契约.md`` §3 的协议常量 0.020 s）对齐 ⇒ Δd 与指令速度严格
-       成比例，本机调度抖动不会把 twist 放大
- 发   ``B,<mv>,<flags>``       10 Hz，模拟电池缓慢掉压
+ recv ``V,<vx>,<vy>,<w>``  -> record it and integrate into four-wheel odometry via C's ``mecanum_inverse()``
+ recv ``M`` / ``P`` / ``S`` / ``reset`` -> reply ``A,OK ...``; ``S`` zeroes the velocity; ``reset`` clears odometry
+ send ``E,<v1..v4>,<d1..d4>``  50 Hz; the four accumulated distances are **integer mm** and only increase (or only decrease), never reset
+     ↑ each E frame advances odometry by a **fixed 20 ms step** (not wall-clock accumulation), matching the bridge's normalization
+       period (the 0.020 s protocol constant in ``11_interface_contract.md`` §3) ⇒ Δd is strictly proportional
+       to the commanded speed, and local scheduling jitter cannot inflate the twist
+ send ``B,<mv>,<flags>``       10 Hz, simulating a slowly draining battery
 ===  =========================================================================
 
-★★ 铁律：这个假 STM32 **不许自己写麦轮公式**。四轮速度一律调 ``mecanum_inverse()``
-（经 ``stm32_bridge.kinematics`` 加载 ``libomninav_core.so``）。所以它和桥用的是
-**同一份数学**，端到端测试才真的在验证"两边对得上"，而不是"两边错得一样"。
+★★ Iron rule: this fake STM32 **must not implement mecanum formulas itself**. Wheel speeds always come from ``mecanum_inverse()``
+(loaded from ``libomninav_core.so`` via ``stm32_bridge.kinematics``). So it uses the
+**same math** as the bridge, so the end-to-end test really verifies "the two sides agree" rather than "the two sides are wrong the same way".
 
-两种用法：
+Two ways to use it:
 
-1. 被 ``run_e2e.py`` import，在 ``os.openpty()`` 造出来的假串口上跑；
-2. 单独跑（★ 在树莓派上手工联调时很有用）::
+1. Imported by ``run_e2e.py`` and run on the fake serial port created by ``os.openpty()``;
+2. Standalone (★ very useful for manual bring-up on the Pi)::
 
        python3 tools/fake_stm32.py --pty
-       # 打印 PTY_SLAVE=/dev/pts/3，然后另开一个终端：
+       # prints PTY_SLAVE=/dev/pts/3, then open another terminal:
        # ros2 run stm32_bridge stm32_bridge --ros-args -p serial_port:=/dev/pts/3
 """
 
@@ -55,7 +55,7 @@ def _ack(text: str) -> bytes:
 
 
 class FakeStm32:
-    """一个够真、但完全是软件的 STM32 对端。"""
+    """A faithful but entirely software STM32 peer."""
 
     def __init__(
         self,
@@ -71,7 +71,7 @@ class FakeStm32:
         self._core = core if core is not None else kinematics.default_core()
         self._geom = geom if geom is not None else self._core.default_geom()
         if not self._core.geom_is_valid(self._geom):
-            raise ValueError("假 STM32 拿到的几何参数不合法，先修 .so 或参数")
+            raise ValueError("the fake STM32 got invalid geometry; fix the .so or the parameters first")
 
         self._encoder_period = 1.0 / max(1.0, float(encoder_hz))
         self._battery_period = 1.0 / max(0.1, float(battery_hz))
@@ -83,18 +83,18 @@ class FakeStm32:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
-        # 运动状态：当前指令 + 四轮累计里程
+        # Motion state: current command + four-wheel accumulated distance
         self._twist = (0, 0, 0)
-        # ★ 用「mm * ms」的整数累加器积分，避免浮点漂移：
-        #   accum += wheel_mm_s * step_ms  ->  d_mm = accum / 1000（向零截断）
+        # ★ Integrate with an integer "mm * ms" accumulator to avoid floating-point drift:
+        #   accum += wheel_mm_s * step_ms  ->  d_mm = accum / 1000 (truncate toward zero)
         self._accum = [0] * WHEEL_COUNT
-        # ★ 固定步进：每发一帧 E 推进一个**名义**编码器周期（默认 20 ms），
-        #   与桥的归一化周期（0.020 s，见契约 §3）一致；墙钟只用来决定"何时发
-        #   下一帧"，不再参与里程积分。桥若改了名义周期，这里必须同步改。
+        # ★ Fixed step: every E frame advances one **nominal** encoder period (20 ms by default),
+        #   matching the bridge's normalization period (0.020 s, see contract §3); the wall clock only decides "when to send
+        #   the next frame" and no longer participates in the odometry integration. If the bridge changes the nominal period, this must change too.
         self._step_ms = max(1, int(round(self._encoder_period * 1000.0)))
         self._estop = False
 
-        # 观测（给 run_e2e / 人工看）
+        # Observations (for run_e2e / humans)
         self.v_frames: List[Tuple[int, int, int]] = []
         self.lines_received: List[str] = []
         self.acks_sent: List[str] = []
@@ -125,9 +125,9 @@ class FakeStm32:
     @property
     def wheel_mm(self) -> List[int]:
         with self._lock:
-            # ★ 用 int(v / 1000) 向零截断，**不要**用 v // 1000（向下取整）：
-            #   C 侧的整数除法是向零截断，后退时两者差 1 mm，端到端对 Δd 严格
-            #   比对时会偶发假红。|v| < 2^53 之前 float 除法是精确的。
+            # ★ Use int(v / 1000) to truncate toward zero, **not** v // 1000 (floor division):
+            #   C's integer division truncates toward zero; the two differ by 1 mm when reversing, and the end-to-end
+            #   comparison on Δd would occasionally go falsely red. float division is exact for |v| < 2^53.
             return [int(value / 1000) for value in self._accum]
 
     # ------------------------------------------------------------------
@@ -138,7 +138,7 @@ class FakeStm32:
         while not self._stop.is_set():
             try:
                 data = self._transport.read(256)
-            except Exception as exc:  # 对端关掉了 fd
+            except Exception as exc:  # the peer closed the fd
                 self.last_error = "%s: %s" % (type(exc).__name__, exc)
                 return
             if data:
@@ -159,7 +159,7 @@ class FakeStm32:
     def _consume(self, data: bytes) -> None:
         for frame in self._decoder.feed(data):
             if isinstance(frame, EncoderFrame):
-                continue  # 上行帧，假 STM32 不该收到
+                continue  # uplink frame; the fake STM32 should never receive it
             if isinstance(frame, (BatteryFrame,)):
                 continue
             if isinstance(frame, AckFrame):
@@ -218,13 +218,13 @@ class FakeStm32:
                 ),
             )
             speeds = [int(wheels.wheel_mm_s[i]) for i in range(WHEEL_COUNT)]
-            # ★ 先按固定名义步长推进里程，再取累计值发出去：这样相邻两帧 E 的
-            #   差值 Δd（整数 mm）恰好等于 speeds × step_ms，桥按 0.020 s 归一化
-            #   后 twist 精确还原成指令速度，不受本机读写抖动影响。
+            # ★ Advance odometry by the fixed nominal step first, then send the accumulated value: this way the
+            #   Δd between adjacent E frames (integer mm) is exactly speeds × step_ms, and normalizing by 0.020 s
+            #   in the bridge restores the commanded speed exactly, independent of local read/write jitter.
             if not self._estop:
                 for index in range(WHEEL_COUNT):
                     self._accum[index] += speeds[index] * self._step_ms
-            # ★ 同 wheel_mm：向零截断，别用 //（见上面那段注释）。
+            # ★ Same as wheel_mm: truncate toward zero, do not use // (see the note above).
             distances = [int(self._accum[i] / 1000) for i in range(WHEEL_COUNT)]
         payload = "E," + ",".join(str(v) for v in speeds + distances) + "\n"
         if self._send(payload.encode("ascii")):
@@ -247,12 +247,12 @@ class FakeStm32:
 
 
 # --------------------------------------------------------------------------
-# 传输层：裸 fd（pty）或 pyserial
+# Transport: raw fd (pty) or pyserial
 # --------------------------------------------------------------------------
 
 
 class FdTransport:
-    """裸文件描述符（``os.openpty()`` 返回的 master 端）。非阻塞读。"""
+    """Raw file descriptor (the master end returned by ``os.openpty()``). Non-blocking reads."""
 
     def __init__(self, fd: int) -> None:
         self._fd = fd
@@ -264,8 +264,8 @@ class FdTransport:
         except BlockingIOError:
             return b""
         except OSError:
-            # 对端（pyserial）关掉 slave 后会得到 EIO —— 当成"没有数据"，
-            # 让上层自己按超时结束。
+            # After the peer (pyserial) closes the slave, reads get EIO — treat that as "no data"
+            # and let the caller finish by its own timeout.
             return b""
 
     def write(self, payload: bytes) -> int:
@@ -279,7 +279,7 @@ class FdTransport:
 
 
 class SerialTransport:
-    """接真实串口（联调时把假 STM32 接在 USB-TTL 的另一头）。"""
+    """Talk to a real serial port (during bring-up, connect the fake STM32 to the other end of the USB-TTL)."""
 
     def __init__(self, port: str, baudrate: int = 115200) -> None:
         import serial
@@ -307,26 +307,26 @@ class SerialTransport:
 
 
 # --------------------------------------------------------------------------
-# 单独运行
+# Standalone
 # --------------------------------------------------------------------------
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="假 STM32（零硬件联调）")
-    parser.add_argument("--pty", action="store_true", help="自己造一个伪终端并打印从端路径（默认）")
-    parser.add_argument("--port", default=None, help="用真实串口，例如 /dev/ttyUSB0")
+    parser = argparse.ArgumentParser(description="fake STM32 (zero-hardware bring-up)")
+    parser.add_argument("--pty", action="store_true", help="create a pseudo-terminal and print the slave path (default)")
+    parser.add_argument("--port", default=None, help="use a real serial port, e.g. /dev/ttyUSB0")
     parser.add_argument("--baudrate", type=int, default=115200)
-    parser.add_argument("--duration", type=float, default=0.0, help="跑多少秒后退出；0 = 一直跑")
-    parser.add_argument("--hz", type=float, default=50.0, help="E 帧频率")
+    parser.add_argument("--duration", type=float, default=0.0, help="run for this many seconds then exit; 0 = run forever")
+    parser.add_argument("--hz", type=float, default=50.0, help="E-frame rate")
     args = parser.parse_args(argv)
 
     transport = None
     if args.port:
         transport = SerialTransport(args.port, args.baudrate)
-        print("在 %s @ %d 上扮演 STM32" % (args.port, args.baudrate))
+        print("acting as the STM32 on %s @ %d" % (args.port, args.baudrate))
     else:
         if not sys.platform.startswith("linux"):
-            print("伪终端只在 Linux 上有；这个平台请用 --port 指向真实串口", file=sys.stderr)
+            print("pseudo-terminals exist only on Linux; on this platform point --port at a real serial port", file=sys.stderr)
             return 2
         import tty
 
@@ -335,7 +335,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         slave_name = os.ttyname(slave_fd)
         transport = FdTransport(master_fd)
         print("PTY_SLAVE=%s" % slave_name)
-        print("另开一个终端跑：")
+        print("Run this in another terminal:")
         print("  ros2 run stm32_bridge stm32_bridge --ros-args -p serial_port:=%s" % slave_name)
         sys.stdout.flush()
 
@@ -351,11 +351,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         fake.stop()
         fake.join()
         print(
-            "收尾：E 帧 %d 条、B 帧 %d 条、收到 V 指令 %d 条"
+            "Shutdown: %d E frames, %d B frames, %d V commands received"
             % (fake.e_frames_sent, fake.b_frames_sent, len(fake.v_frames))
         )
         if fake.last_error:
-            print("传输层最后一次错误：%s" % fake.last_error)
+            print("last transport error: %s" % fake.last_error)
     return 0
 
 

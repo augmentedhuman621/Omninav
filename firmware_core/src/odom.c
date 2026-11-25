@@ -1,58 +1,58 @@
 /*
- * odom.c — 圆弧积分里程计实现
+ * odom.c -- arc-integration odometry implementation
  *
- * 纯整数、零依赖：本文件只 include "odom.h"（后者只 include <stdint.h> 与 "mecanum.h"）。
- * 无动态内存、无全局可变状态、无递归。
+ * Integer-only, zero dependencies: this file only includes "odom.h" (which only includes <stdint.h> and "mecanum.h").
+ * No dynamic memory, no global mutable state, no recursion.
  *
- * 数学与「为什么必须圆弧积分」的完整说明见 odom.h 文件头。
+ * See the odom.h file header for the math and why arc integration is required.
  */
 
 #include "odom.h"
 
 /* ------------------------------------------------------------------ */
-/* 常数                                                                */
+/* Constants                                                          */
 /* ------------------------------------------------------------------ */
 
-/* 一整圈 = 2π × 1000 mrad。用 6283 近似 6283.185，周期误差 0.003%，
- * 对里程计的影响远小于编码器量化，可忽略。 */
+/* One full turn = 2*pi x 1000 mrad. 6283 approximates 6283.185; the 0.003%
+ * period error matters far less than encoder quantization and is negligible. */
 #define ODOM_MRAD_PER_TURN  6283
-#define ODOM_MRAD_PER_HALF  3142  /* π × 1000 ≈ 3141.593 */
-#define ODOM_MRAD_PER_QUART 1571  /* π/2 × 1000 ≈ 1570.796 */
+#define ODOM_MRAD_PER_HALF  3142  /* pi x 1000 ~ 3141.593 */
+#define ODOM_MRAD_PER_QUART 1571  /* pi/2 x 1000 ~ 1570.796 */
 
-/* 三角函数内部用的定点基数：Q20。选 Q20 而不是 Q15，是因为
- *   x 用 Q12 时在「小角度」区取整误差太大（80 mrad 处正弦能差 1%），
- *   而里程计恰恰长期工作在小角度区。Q20 下全量程误差约 0.01%。 */
+/* Fixed-point base for the internal trig: Q20. Chosen over Q15 because with Q12
+ *   x the rounding error in the small-angle region is too large (sine differs by
+ *   1% at 80 mrad), and odometry works there nearly always; Q20 gives ~0.01%. */
 #define ODOM_Q20 1048576
 
-/* ★ 航向角归一化用的回绕量（11_接口契约.md §5.1 定案）。
+/* Wrap constant for heading normalization (11_interface_contract.md section 5.1).
  *
- * 回绕量必须是**整圈**的整数倍，否则「角度等价」会被破坏：归一化做的事
- * 就是「减去 k 圈」，若一圈的标称值不是整圈，跨过回绕点时航向会跳变。
- * 曾经用过 180000，那是个真 bug 而不是注释笔误 ——
- *   2 × 180000 = 360000 mrad = 360 rad = 57.2958 圈（**非整数**，
- *   余 0.2958 圈 = **106.48°**）⇒ |θ| 一旦越过 180000，航向直接跳 106.48°。
- *   按 0.1°/s 的 yaw 漂移，约 8 小时就能累积到 28.6 圈踩上去，
- *   而 odom.h 给这行写的用途恰恰是「适合长期运行」。
+ * The wrap constant must be an integer number of full turns, otherwise "angle
+ * equivalence" breaks: normalization subtracts k full turns, so if the nominal
+ * turn is not a whole turn, the heading jumps when crossing the wrap point. An
+ *   earlier version used 180000 -- that was a real bug, not a comment typo:
+ *   2 x 180000 = 360000 mrad = 360 rad = 57.2958 turns (NOT an integer;
+ *   0.2958 turns = 106.48 deg left over) => a 106.48 deg heading jump once
+ *   |theta| crosses 180000. At 0.1 deg/s drift that takes ~8 h and 28.6 turns -- while odom.h called it "long-term suitable".
  *
- * 现在取整圈 6284 mrad（≈ 2π = 6283.185 mrad）：每回绕一次引入
- * 0.815 mrad ≈ 0.047° 的误差 —— 这是 mrad 整数化本身的下限，可接受，
- * 且远小于编码器量化（单计数台阶 4.7596 mm/s）。
+ * Now a whole turn of 6284 mrad (~2*pi = 6283.185 mrad): each wrap adds
+ * 0.815 mrad ~ 0.047 deg of error -- the floor set by integer mrad, acceptable
+ * and far below encoder quantization (4.7596 mm/s per single count step).
  *
- * pose.theta_mrad ∈ (-3142, 3142]，是**规范航向角，可以直接当 yaw 用**，
- * 调用方不需要再归一化；total.theta_mrad 仍是不归一化的 int64 累计量。
+ * pose.theta_mrad is in (-3142, 3142], the canonical heading, directly usable as
+ * yaw; callers need no further normalization. total.theta_mrad stays an unnormalized int64.
  *
- * 注：本值与上面 `ODOM_MRAD_PER_HALF`（三角函数角度归约用的半圈）数值相同，
- * 但**职责完全不同、别合并**：那个必须是数学上的 π×1000 才能正确归约象限，
- * 这个必须是「整圈 / 2」才能保证归一化的角度等价性。以前两者不相等
- * （180000 vs 3142）恰恰说明二者不该用同一个宏。 */
-#define ODOM_HALF_TURN_MRAD 3142  /* π × 1000 ≈ 3141.593 */
-#define ODOM_FULL_TURN_MRAD 6284  /* 2 × ODOM_HALF_TURN_MRAD，必须是一整圈 */
+ * Note: this value matches ODOM_MRAD_PER_HALF above (the half turn used for trig
+ * angle reduction), but the duties are completely different -- do not merge:
+ * that one must be mathematical pi*1000 to reduce quadrants correctly, while this
+ * one must be "full turn / 2" to keep angle equivalence (180000 vs 3142 proved it). */
+#define ODOM_HALF_TURN_MRAD 3142  /* pi x 1000 ~ 3141.593 */
+#define ODOM_FULL_TURN_MRAD 6284  /* 2 x ODOM_HALF_TURN_MRAD, must be a whole turn */
 
 /* ------------------------------------------------------------------ */
-/* 内部工具                                                            */
+/* Internal helpers                                                   */
 /* ------------------------------------------------------------------ */
 
-/* 对称四舍五入（round half away from zero）。den 必须 > 0。 */
+/* Symmetric rounding (round half away from zero). den must be > 0. */
 static int64_t odom_div_round(int64_t num, int64_t den)
 {
     if (num >= 0) {
@@ -73,13 +73,13 @@ static int64_t odom_clamp_i64(int64_t v, int64_t lo, int64_t hi)
 }
 
 /*
- * 正弦，输入「毫弧度」（任意大小，内部先归约），输出 Q15（±32767）。
- * 只做「把角度折到 [0, π/2]，再用泰勒级数求 s(x)/x」这一件事
- * （下文一律用 s(x) 记正弦、c(x) 记余弦 —— 目录里的 `check-purity`
- *   对源码做了整词禁用检查，注释里也不能出现那两个英文函数名）。
- * 不引任何库函数，也不用查表 —— 表会占 Flash，而这个多项式只需要几个乘法。
+ * Sine: input in mrad (any magnitude, reduced internally), output Q15 (+/-32767).
+ * It only folds the angle into [0, pi/2] and evaluates s(x)/x by Taylor series
+ * (below, s(x) means sine and c(x) means cosine; the repo's `check-purity` lint
+ *   bans whole words, so those two English names must not appear in comments).
+ * No library calls, no lookup table (a table costs Flash; this needs a few multiplies).
  *
- * 精度实测（在测试里会打印）：全量程最大误差 < 0.01%。
+ * Measured accuracy (printed in the tests): full-range max error < 0.01%.
  */
 static int32_t odom_sine_q15(int64_t mrad)
 {
@@ -95,26 +95,26 @@ static int32_t odom_sine_q15(int64_t mrad)
 
     a = mrad % (int64_t)ODOM_MRAD_PER_TURN;
     if (a < 0) {
-        a += (int64_t)ODOM_MRAD_PER_TURN; /* 归约到 [0, 6283) */
+        a += (int64_t)ODOM_MRAD_PER_TURN; /* reduce to [0, 6283) */
     }
     if (a >= (int64_t)ODOM_MRAD_PER_HALF) {
         a -= (int64_t)ODOM_MRAD_PER_HALF;
-        sign = -1; /* 归约到 [0, 3142)，用 s(π−x) = s(x) */
+        sign = -1; /* reduce to [0, 3142) via s(pi - x) = s(x) */
     }
     if (a > (int64_t)ODOM_MRAD_PER_QUART) {
-        a = (int64_t)ODOM_MRAD_PER_HALF - a; /* 折到 [0, 1571]，用 s(π/2+..) 的对称 */
+        a = (int64_t)ODOM_MRAD_PER_HALF - a; /* fold to [0, 1571] via the s(pi/2 + ..) symmetry */
     }
 
-    x  = a * (int64_t)ODOM_Q20 / 1000;          /* Q20 弧度，a <= 1571 => x <= 1647312 */
-    x2 = x * x / (int64_t)ODOM_Q20;             /* Q20 x² */
-    x4 = x2 * x2 / (int64_t)ODOM_Q20;           /* Q20 x⁴ */
-    x6 = x4 * x2 / (int64_t)ODOM_Q20;           /* Q20 x⁶ */
-    x8 = x6 * x2 / (int64_t)ODOM_Q20;           /* Q20 x⁸ */
+    x  = a * (int64_t)ODOM_Q20 / 1000;          /* Q20 radians, a <= 1571 => x <= 1647312 */
+    x2 = x * x / (int64_t)ODOM_Q20;             /* Q20 x^2 */
+    x4 = x2 * x2 / (int64_t)ODOM_Q20;           /* Q20 x^4 */
+    x6 = x4 * x2 / (int64_t)ODOM_Q20;           /* Q20 x^6 */
+    x8 = x6 * x2 / (int64_t)ODOM_Q20;           /* Q20 x^8 */
 
-    /* s(x)/x = 1 − x²/6 + x⁴/120 − x⁶/5040 + x⁸/362880 （到 x⁸ 就够） */
+    /* s(x)/x = 1 - x^2/6 + x^4/120 - x^6/5040 + x^8/362880 (x^8 is enough) */
     poly = (int64_t)ODOM_Q20 - x2 / 6 + x4 / 120 - x6 / 5040 + x8 / 362880;
 
-    s = x * poly / (int64_t)ODOM_Q20; /* Q20 正弦 */
+    s = x * poly / (int64_t)ODOM_Q20; /* Q20 sine */
     s = s / 32;                       /* Q20 -> Q15 */
 
     if (sign < 0) {
@@ -123,20 +123,20 @@ static int32_t odom_sine_q15(int64_t mrad)
     return (int32_t)odom_clamp_i64(s, -32768, 32767);
 }
 
-/* 余弦：直接用 s(x + π/2)。省一份多项式，也少一处不一致的可能。 */
+/* Cosine: just s(x + pi/2). Saves one polynomial and one chance to diverge. */
 static int32_t odom_cosine_q15(int64_t mrad)
 {
     return odom_sine_q15(mrad + (int64_t)ODOM_MRAD_PER_QUART);
 }
 
-/* 把累计角度归一化到 (-ODOM_HALF_TURN_MRAD, ODOM_HALF_TURN_MRAD] mrad，
- * 即 (-3142, 3142]。用整数取模，长期运行不溢出。
+/* Normalize the accumulated angle to (-ODOM_HALF_TURN_MRAD, ODOM_HALF_TURN_MRAD] mrad,
+ * i.e. (-3142, 3142]. Integer modulo, so long runs do not overflow.
  *
- * 恒等式（测试 [5] 的判据 b 就是验这个）：
- *   pose_theta − total_theta ≡ 0 (mod ODOM_FULL_TURN_MRAD)
- * 因为归一化只做「减去 k 个整圈」，而 ODOM_FULL_TURN_MRAD 恰好是一整圈
- * ⇒ 归一化保持角度等价。取模那步用了 (HALF−1) 做偏置，正是为了让结果
- * 落在左开右闭区间 (-HALF, +HALF]。 */
+ * Identity (criterion b of test [5] checks exactly this):
+ *   pose_theta - total_theta == 0 (mod ODOM_FULL_TURN_MRAD)
+ * because normalization only subtracts k whole turns and ODOM_FULL_TURN_MRAD is
+ * exactly one whole turn => normalization preserves angle equivalence. The modulo
+ * step biases by (HALF-1) so the result lands in the left-open interval (-HALF, +HALF]. */
 static int32_t odom_normalize_mrad(int64_t t)
 {
     int64_t m = (t + (int64_t)(ODOM_HALF_TURN_MRAD - 1)) % (int64_t)ODOM_FULL_TURN_MRAD;
@@ -147,7 +147,7 @@ static int32_t odom_normalize_mrad(int64_t t)
 }
 
 /* ------------------------------------------------------------------ */
-/* 复位                                                                */
+/* Reset                                                              */
 /* ------------------------------------------------------------------ */
 
 void odom_reset(odom_pose_t *pose, odom_total_t *total)
@@ -165,7 +165,7 @@ void odom_reset(odom_pose_t *pose, odom_total_t *total)
 }
 
 /* ------------------------------------------------------------------ */
-/* 一步更新                                                            */
+/* One-step update                                                    */
 /* ------------------------------------------------------------------ */
 
 int odom_update(odom_pose_t *pose, odom_total_t *total,
@@ -200,21 +200,21 @@ int odom_update(odom_pose_t *pose, odom_total_t *total,
         return 0;
     }
 
-    /* 1) 四轮位移增量（mm）。用 int64 做差再夹回 int32，
-     *    这样即使两帧计数差得离谱也不会溢出。 */
+    /* 1) Per-wheel displacement increment (mm). Difference in int64, then clamp
+     *    back to int32, so even a wild two-frame count difference cannot overflow. */
     for (i = 0; i < MECANUM_WHEEL_COUNT; ++i) {
         int64_t d = (int64_t)d_now[i] - (int64_t)d_prev[i];
         d = odom_clamp_i64(d, -2147483648LL, 2147483647LL);
         w.wheel_mm_s[i] = (int32_t)d;
     }
 
-    /* 2) 正解：线性映射，喂位移增量就得到「机体位移 + 转角增量」 */
+    /* 2) Forward kinematics: linear map; feed displacement increments to get body displacement + rotation increment */
     mecanum_forward(g, &w, &inc);
 
-    /* 单步转角护栏。物理上一个 20 ms 控制周期转不过 90°（按最高轮速
-     * 1000 mm/s、L=300 mm 估算上限约 267 mrad），这条护栏专为脏数据准备：
-     * 计数增量一旦离谱，下面的级数中间量会溢出，而有符号溢出是 UB。
-     * 护栏把「单步转角」限制在 ±π/2 内，级数到 h⁸ 在这个区间内相对误差 < 1e-9。 */
+    /* Per-step rotation guardrail. Physically a 20 ms control period cannot turn 90
+     * deg (1000 mm/s top speed, L=300 mm => bound ~267 mrad); it exists for dirty
+     * data: a wild count increment would overflow the series intermediates below
+     * (signed overflow is UB). Bounds rotation to +/-pi/2, h^8 series error < 1e-9. */
     if (inc.omega_mrad_s > ODOM_MRAD_PER_QUART) {
         inc.omega_mrad_s = ODOM_MRAD_PER_QUART;
     } else if (inc.omega_mrad_s < -ODOM_MRAD_PER_QUART) {
@@ -229,20 +229,20 @@ int odom_update(odom_pose_t *pose, odom_total_t *total,
     dy     = (int64_t)inc.vy_mm_s;
     dtheta = (int64_t)inc.omega_mrad_s;
 
-    /* 3) 圆弧积分的 sinc 因子 k = s(h)/h（h = Δθ/2 的弧度值），Q15。
-     *    |Δθ| 很小时直接取 1：此时 1 − k ≈ (Δθ/2)²/6，Δθ=8 mrad 时不到 3e-6。
-     *    否则用 k 自己的级数 k = 1 − h²/6 + h⁴/120 − h⁶/5040 + h⁸/362880 直接算 ——
-     *    ★ 不要写成「先求 s(h) 再除以 h」两步算：小角度时 s(h) 的整数结果
-     *      只有两三位有效数字，再拿去做除法会把相对误差放大到千分之二量级，
-     *      几十步累积下来就是几毫米的系统性位置偏差。这里在 Q30 上算，
-     *      最后一步才降到 Q15。
+    /* 3) Arc-integration sinc factor k = s(h)/h (h = delta_theta/2 radians), Q15.
+     *    For very small |delta_theta| take 1: then 1 - k ~ (delta_theta/2)^2/6,
+     *    under 3e-6 at 8 mrad. Otherwise evaluate k's own series
+     *    k = 1 - h^2/6 + h^4/120 - h^6/5040 + h^8/362880 directly -- do NOT compute
+     *      it in two steps, "s(h) then divide by h": at small angles integer s(h) has
+     *      only two or three significant digits, and the division inflates relative
+     *      error to ~2e-3 (several mm after dozens of steps). Computed in Q30, Q15 last.
      *
-     *    ★ 量纲（踩过坑，写清楚）：h 的单位是 mrad，而级数里要的是弧度 h/1000。
-     *      所以把 h 的高次幂降 6 位存：u2 = h²，u4 = h⁴/1e6，u6 = h⁶/1e12，
-     *      u8 = h⁸/1e18 —— 这样每一项 u_k 恰好等于「弧度幂 × 1e6」，
-     *      除以 (系数 × 1e6) 就回到无量纲，再乘 2^30 升到 Q30。
-     *      即分母依次是 6e6 / 1.2e8 / 5.04e9 / 3.6288e11。
-     *      护栏已把 |Δθ| 限在 π/2 内，此处中间量最大约 1e14，远离 int64 溢出。 */
+     *    Dimensions (a past trap, spelled out): h is in mrad but the series wants
+     *      radians, h/1000. So higher powers of h are stored scaled down by 1e6:
+     *      u2 = h^2, u4 = h^4/1e6, u6 = h^6/1e12, u8 = h^8/1e18 -- each u_k is then
+     *      exactly "radian power x 1e6"; dividing by (coefficient x 1e6) gives a
+     *      dimensionless value, and x 2^30 lifts it to Q30. Denominators: 6e6 /
+     *      1.2e8 / 5.04e9 / 3.6288e11. Guarded |delta_theta| <= pi/2 keeps intermediates ~1e14, far from int64 overflow. */
     if (dtheta > -8 && dtheta < 8) {
         k_q15 = 32768;
     } else {
@@ -251,11 +251,11 @@ int odom_update(odom_pose_t *pose, odom_total_t *total,
         int64_t u6;
         int64_t u8;
         int64_t k_q30;
-        h  = dtheta / 2; /* 单位 mrad；|Δθ| >= 8 保证 h != 0 */
-        u2 = h * h;                            /* h²        */
-        u4 = (u2 * u2) / 1000000LL;            /* h⁴ / 1e6  */
-        u6 = (u4 * u2) / 1000000LL;            /* h⁶ / 1e12 */
-        u8 = (u6 * u2) / 1000000LL;            /* h⁸ / 1e18 */
+        h  = dtheta / 2; /* in mrad; |delta_theta| >= 8 guarantees h != 0 */
+        u2 = h * h;                            /* h^2        */
+        u4 = (u2 * u2) / 1000000LL;            /* h^4 / 1e6  */
+        u6 = (u4 * u2) / 1000000LL;            /* h^6 / 1e12 */
+        u8 = (u6 * u2) / 1000000LL;            /* h^8 / 1e18 */
         k_q30 = ((int64_t)1 << 30)
               - (u2 * ((int64_t)1 << 30)) / 6000000LL
               + (u4 * ((int64_t)1 << 30)) / 120000000LL
@@ -264,7 +264,7 @@ int odom_update(odom_pose_t *pose, odom_total_t *total,
         k_q15 = k_q30 / 32768;
     }
 
-    /* 4) 按本步「中间航向」把机体位移旋到世界系 */
+    /* 4) Rotate the body displacement into the world frame by this step's mid heading */
     theta_mid = total->theta_mrad + dtheta / 2;
     sin_m     = odom_sine_q15(theta_mid);
     cos_m     = odom_cosine_q15(theta_mid);
@@ -274,7 +274,7 @@ int odom_update(odom_pose_t *pose, odom_total_t *total,
     d_y_world = odom_div_round(k_q15 * (dx * (int64_t)sin_m + dy * (int64_t)cos_m),
                                (int64_t)1 << 30);
 
-    /* 5) 提交 */
+    /* 5) Commit */
     pose->x_mm  += d_x_world;
     pose->y_mm  += d_y_world;
     total->x_mm += d_x_world;

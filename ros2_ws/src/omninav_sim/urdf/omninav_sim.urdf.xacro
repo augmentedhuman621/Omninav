@@ -1,22 +1,22 @@
 <?xml version="1.0"?>
 <!--
-  OmniNav 麦轮车仿真模型（Gazebo Classic 11 / ROS2 Humble 已验证；Jazzy 端仍用 USB 串口，不依赖本文件）
+  OmniNav mecanum-wheel robot simulation model (verified on Gazebo Classic 11 / ROS2 Humble; the Jazzy side still uses the USB serial port and does not depend on this file)
 
-  说明：
-  1. 本文件是"几何体近似"版本：外形尺寸来自 CAD 实测（见下），碰撞体用 box/cylinder，
-     不直接使用 SolidWorks 网格（整机网格 19.7 万面/轮，Gazebo 会卡）。
-  2. 尺寸来源（2026-11-25 SolidWorks MCP 实测 + 推断）：
-     - 麦轮：Ø80.37 x 宽 41.00 mm -> wheel_r=0.0400, wheel_w=0.0410
-     - 电机安装件两组间距：203 mm / 210 mm -> wheelbase/track 先取 0.200 / 0.210（TODO 实物复测）
-     - 大底盘：230 x 3 x 304.88 mm（含侧板），车体占位取 230 x 180 x 90 mm
-     - 总装质量为默认密度 1000 kg/m3 的无效值，质量/惯量为工程估计（TODO 实物称重后替换）
-  3. 驱动方案：libgazebo_ros_planar_move.so（全向，直接吃 /cmd_vel，发布 /odom 与 TF）。
-     因此仿真时不要同时启动 stm32_bridge 或 fake_stm32.py，否则 /odom 与 TF 会打架。
-  4. 雷达：libgazebo_ros_ray_sensor.so，360 线 10 Hz，量程 0.12-8 m，输出 /scan。
+  Notes:
+  1. This file is a "primitive geometry approximation": dimensions come from CAD measurements (see below); collisions use box/cylinder,
+     and SolidWorks meshes are not used directly (the full-robot mesh is 197k faces per wheel and would stall Gazebo).
+  2. Dimension sources (2026-11-25 SolidWorks MCP measurements + inference):
+     - Mecanum wheel: Ø80.37 x width 41.00 mm -> wheel_r=0.0400, wheel_w=0.0410
+     - Motor mount spacing between the two groups: 203 mm / 210 mm -> wheelbase/track tentatively 0.200 / 0.210 (TODO re-measure)
+     - Main chassis plate: 230 x 3 x 304.88 mm (including side plates); body bounding box taken as 230 x 180 x 90 mm
+     - Total assembly mass is invalid at the default density 1000 kg/m3; mass/inertia are engineering estimates (TODO replace after weighing)
+  3. Drive: libgazebo_ros_planar_move.so (omnidirectional, takes /cmd_vel directly, publishes /odom and TF).
+     Therefore do not start stm32_bridge or fake_stm32.py at the same time in simulation, or /odom and TF will conflict.
+  4. Lidar: libgazebo_ros_ray_sensor.so, 360 rays at 10 Hz, range 0.12-8 m, output /scan.
 -->
 <robot name="omninav_sim" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
-  <!-- ==================== 可调参数（TODO: 实物实测后替换） ==================== -->
+  <!-- ==================== Tunable parameters (TODO: replace with real measurements) ==================== -->
   <xacro:property name="wheelbase" value="0.200"/>
   <xacro:property name="track"     value="0.210"/>
   <xacro:property name="wheel_r"   value="0.0400"/>
@@ -24,15 +24,15 @@
   <xacro:property name="base_l"    value="0.230"/>
   <xacro:property name="base_w"    value="0.180"/>
   <xacro:property name="base_h"    value="0.090"/>
-  <xacro:property name="base_z"    value="0.075"/>   <!-- base_link 距地高度 -->
-  <xacro:property name="m_base"    value="2.2"/>     <!-- kg，估计值 -->
-  <xacro:property name="m_wheel"   value="0.15"/>    <!-- kg，估计值 -->
+  <xacro:property name="base_z"    value="0.075"/>   <!-- height of base_link above the ground -->
+  <xacro:property name="m_base"    value="2.2"/>     <!-- kg, estimated -->
+  <xacro:property name="m_wheel"   value="0.15"/>    <!-- kg, estimated -->
   <xacro:property name="m_batt"    value="0.55"/>
   <xacro:property name="m_pi"      value="0.10"/>
   <xacro:property name="m_stm32"   value="0.06"/>
   <xacro:property name="m_lidar"   value="0.12"/>
 
-  <!-- ==================== 惯量宏 ==================== -->
+  <!-- ==================== Inertia macros ==================== -->
   <xacro:macro name="inertial_box" params="m x y z">
     <inertial>
       <mass value="${m}"/>
@@ -51,7 +51,7 @@
     </inertial>
   </xacro:macro>
 
-  <!-- ==================== 车体 base_link ==================== -->
+  <!-- ==================== Chassis base_link ==================== -->
   <link name="base_link">
     <xacro:inertial_box m="${m_base}" x="${base_l}" y="${base_w}" z="${base_h}"/>
     <visual>
@@ -65,7 +65,7 @@
     </collision>
   </link>
 
-  <!-- ==================== 麦轮（4 个，固定关节；planar_move 不需要轮子转） ==================== -->
+  <!-- ==================== Mecanum wheels (4, fixed joints; planar_move does not need the wheels to spin) ==================== -->
   <xacro:macro name="wheel" params="name x y">
     <link name="wheel_${name}">
       <xacro:inertial_cyl m="${m_wheel}" r="${wheel_r}" l="${wheel_w}"/>
@@ -91,8 +91,8 @@
   <xacro:wheel name="rl" x="${-wheelbase/2}" y="${ track/2}"/>
   <xacro:wheel name="rr" x="${-wheelbase/2}" y="${-track/2}"/>
 
-  <!-- ==================== 外形件（外观用，不参与动力学要点） ==================== -->
-  <!-- 电池盒：CAD 里在车体上方后部 -->
+  <!-- ==================== Body parts (visual only, not relevant to the dynamics) ==================== -->
+  <!-- Battery box: located at the rear top of the chassis in CAD -->
   <link name="battery_link">
     <xacro:inertial_box m="${m_batt}" x="0.11" y="0.075" z="0.055"/>
     <visual>
@@ -106,7 +106,7 @@
     <origin xyz="-0.045 0 ${base_h/2 + 0.0275}" rpy="0 0 0"/>
   </joint>
 
-  <!-- 树莓派 5 -->
+  <!-- Raspberry Pi 5 -->
   <link name="pi_link">
     <xacro:inertial_box m="${m_pi}" x="0.09" y="0.06" z="0.03"/>
     <visual>
@@ -120,7 +120,7 @@
     <origin xyz="0.055 0.030 ${base_h/2 + 0.015}" rpy="0 0 0"/>
   </joint>
 
-  <!-- STM32F103ZET6 主板 -->
+  <!-- STM32F103ZET6 main board -->
   <link name="stm32_link">
     <xacro:inertial_box m="${m_stm32}" x="0.10" y="0.06" z="0.02"/>
     <visual>
@@ -134,7 +134,7 @@
     <origin xyz="0.055 -0.030 ${base_h/2 + 0.010}" rpy="0 0 0"/>
   </joint>
 
-  <!-- 2D 雷达（位置/高度为占位，TODO 实物确认；实际是 ESP32-S3 前挂或车顶，视最终装配） -->
+  <!-- 2D lidar (position/height are placeholders, TODO confirm on the real robot; in practice it is either front-mounted on the ESP32-S3 or roof-mounted, depending on final assembly) -->
   <link name="lidar_link">
     <xacro:inertial_cyl m="${m_lidar}" r="0.030" l="0.050"/>
     <visual>
@@ -148,7 +148,7 @@
     <origin xyz="0 0 ${base_h/2 + 0.025}" rpy="0 0 0"/>
   </joint>
 
-  <!-- ==================== Gazebo：材料与摩擦 ==================== -->
+  <!-- ==================== Gazebo: materials and friction ==================== -->
   <gazebo reference="base_link"><material>Gazebo/DarkGrey</material></gazebo>
   <gazebo reference="wheel_fl"><material>Gazebo/FlatBlack</material><mu1>1.0</mu1><mu2>1.0</mu2><kp>1000000.0</kp><kd>1.0</kd></gazebo>
   <gazebo reference="wheel_fr"><material>Gazebo/FlatBlack</material><mu1>1.0</mu1><mu2>1.0</mu2><kp>1000000.0</kp><kd>1.0</kd></gazebo>
@@ -159,7 +159,7 @@
   <gazebo reference="stm32_link"><material>Gazebo/Black</material></gazebo>
   <gazebo reference="lidar_link"><material>Gazebo/Grey</material></gazebo>
 
-  <!-- ==================== Gazebo：全向驱动插件（/cmd_vel -> 模型移动 + /odom + TF） ==================== -->
+  <!-- ==================== Gazebo: omnidirectional drive plugin (/cmd_vel -> model motion + /odom + TF) ==================== -->
   <gazebo>
     <plugin name="omninav_planar_move" filename="libgazebo_ros_planar_move.so">
       <ros>
@@ -174,7 +174,7 @@
     </plugin>
   </gazebo>
 
-  <!-- ==================== Gazebo：2D 雷达传感器 -> /scan ==================== -->
+  <!-- ==================== Gazebo: 2D lidar sensor -> /scan ==================== -->
   <gazebo reference="lidar_link">
     <sensor type="ray" name="omninav_lidar">
       <pose>0 0 0 0 0 0</pose>

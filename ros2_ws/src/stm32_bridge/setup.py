@@ -1,8 +1,9 @@
-"""ament_python 打包脚本。
+"""ament_python packaging script.
 
-★ 注意：``libomninav_core.so`` **不由本包安装** —— 按契约 §5.3 它有三条查找路径，
-   树莓派上的正式位置是 ``/opt/omninav/lib/libomninav_core.so``，由 ``pi_setup/install_core.sh``
-   安装（架构必须是树莓派本地编出来的 aarch64）。本包只负责 Python 代码。
+★ Note: ``libomninav_core.so`` is **not installed by this package** — per contract §5.3 it has three
+   lookup paths, and its production location on the Raspberry Pi is ``/opt/omninav/lib/libomninav_core.so``,
+   installed by ``pi_setup/install_core.sh`` (it must be built natively on the Pi as aarch64). This package
+   only ships the Python code.
 """
 
 from setuptools import setup
@@ -21,7 +22,7 @@ setup(
     zip_safe=True,
     maintainer="OmniNav",
     maintainer_email="omninav@example.invalid",
-    description="OmniNav STM32 <-> 树莓派 5 串口桥（ROS2 Jazzy）",
+    description="OmniNav STM32 <-> Raspberry Pi 5 serial bridge (ROS2 Jazzy)",
     license="MIT",
     tests_require=["pytest"],
     entry_points={

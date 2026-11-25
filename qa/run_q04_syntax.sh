@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Q-04 / A-02 L1 复核（只读）：WSL gcc -fsyntax-only，宏=0/1 × app_single_wheel.c/main.c
-# 环境：WSL Ubuntu-22.04；Cube 头文件来自 uvprojx IncludePath 指向的 C:\Users\ASUS\STM32Cube\...
-# 不产出任何 .o/.so，不改 workspace 文件。
+# Q-04 / A-02 L1 re-review (read-only): WSL gcc -fsyntax-only, macro=0/1 x app_single_wheel.c/main.c
+# Environment: WSL Ubuntu-22.04; Cube headers come from the C:\Users\ASUS\STM32Cube\... path in uvprojx IncludePath
+# Produces no .o/.so and modifies no workspace file.
 set -uo pipefail
 
-ROOT="/mnt/d/dsh/工程设计"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CUBE="/mnt/c/Users/ASUS/STM32Cube/Repository/STM32Cube_FW_F1_V1.8.7"
 INC="-I$ROOT/stm32_fw/Inc -I$ROOT/firmware_core/include -I$CUBE/Drivers/CMSIS/Device/ST/STM32F1xx/Include -I$CUBE/Drivers/CMSIS/Include -I$CUBE/Drivers/STM32F1xx_HAL_Driver/Inc"
 CFLAGS="-fsyntax-only -std=c99 -Wall -Wextra -DUSE_HAL_DRIVER -DSTM32F103xE"

@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""shadow_probe.py —— 让 STM32 的影子模式真的算几条 V 帧（B1 实机验收 · 喂帧侧）
+"""shadow_probe.py -- make the STM32 shadow mode really compute a few V frames
+(B1 on-target acceptance, frame-feeding side)
 
-背景
-----
-`stm32_fw/Src/usart2_bench.c` 里新加了**影子模式**（本地键 `.s` 切换，默认关）：
+Background
+----------
+`stm32_fw/Src/usart2_bench.c` gained a **shadow mode** (toggled locally by key
+`.s`, off by default):
 
-    收到 `V,<vx>,<vy>,<w>` -> mecanum_solve()（逆解/限幅/死区/装配映射）
-                          -> fixp_mm_s_to_counts()（mm/s -> 编码器计数/控制窗口）
-                          -> 只打印，**不驱动任何电机**
+    receives `V,<vx>,<vy>,<w>` -> mecanum_solve() (inverse kinematics / clamp / deadband / assembly mapping)
+                              -> fixp_mm_s_to_counts() (mm/s -> encoder counts per control window)
+                              -> prints only, **drives no motor**
 
-★ 结果的去向：影子模式的输出走 `logf()`，而 `logf()` 是**两个口都发**
-  （USART1/COM9 + USART2/树莓派），所以本脚本的 `drain()` 里也能看到它，
-  COM9 那侧同样能看到 —— 两边对照着看最省事。
+★ Where the result goes: shadow-mode output goes through `logf()`, which **transmits
+  on both ports** (USART1/COM9 + USART2/Raspberry Pi), so this script's `drain()`
+  sees it too, and the COM9 side sees it as well -- comparing both is the easiest.
 
-所以本脚本只干"喂帧"这一件事，判据在 COM9 那侧看：
-    每条 V 帧应该打印 1 行 `[SHADOW] V,... -> L=... scale=... sat=... `
-    加 4 行 `[SHADOW]   FL/FR/RL/RR wheel=... motor=... target=... cnt/20ms`
+So this script does one thing -- feed frames; the judgement is on the COM9 side:
+    each V frame should print 1 line `[SHADOW] V,... -> L=... scale=... sat=... `
+    plus 4 lines `[SHADOW]   FL/FR/RL/RR wheel=... motor=... target=... cnt/20ms`
 
-用法
-----
-    python3 pi_setup/shadow_probe.py [设备名]      # 默认 /dev/ttySTM32
+Usage
+-----
+    python3 pi_setup/shadow_probe.py [device]      # default /dev/ttySTM32
 
-只用标准库 os + termios，不依赖 pyserial（树莓派上不一定装了）。
-输出全 ASCII。退出码 0 = 四条帧都收到了 #ACK。
+Standard library only, os + termios; no pyserial dependency (it may not be
+installed on the Pi). Output is all ASCII. Exit code 0 = all four frames got #ACK.
 """
 
 import os
@@ -33,33 +35,34 @@ import time
 import re
 
 DEV = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttySTM32"
-BAUD = 115200                    # 给人看的
-# ★ 给 termios 的必须是 B115200 这个常量，不能填 115200 这个整数：
-#   a[4]/a[5] 期待的是 c_cflag 里的 CBAUD 编码，填裸数字会让 tcsetattr 报
-#   errno 22 Invalid argument（第一版就是这么挂的）。test_stm32_link.py 用的是同一个常量。
+BAUD = 115200                    # for humans
+# ★ The value handed to termios must be the constant B115200, never the integer
+#   115200: a[4]/a[5] expect the CBAUD encoding in c_cflag, and a bare number makes
+#   tcsetattr fail with errno 22 Invalid argument (the first version died this way).
+#   test_stm32_link.py uses the same constant.
 BAUD_CONST = termios.B115200
 
-# 影子模式的 4 条测试帧。★ 都是契约 §3 的合法帧（mm/s、mrad/s、全整数）。
+# The 4 shadow-mode test frames. ★ All are legal contract §3 frames (mm/s, mrad/s, all integers).
 FRAMES = [
-    ("直行 forward",      "V,300,0,0"),
-    ("左平移 strafe",     "V,0,300,0"),
-    ("原地左转 rotate",   "V,0,0,1000"),
-    ("斜行+旋转 combo",   "V,300,300,500"),
+    ("forward straight",  "V,300,0,0"),
+    ("left strafe",       "V,0,300,0"),
+    ("rotate left",       "V,0,0,1000"),
+    ("diagonal+rotate",   "V,300,300,500"),
 ]
 
-COUNTS_PER_M = 10505   # firmware_core fixedpoint.h 的名义值
+COUNTS_PER_M = 10505   # nominal value from firmware_core fixedpoint.h
 PERIOD_MS = 20         # FIXP_CONTROL_PERIOD_MS_NOMINAL
 
 
 def counts_of(mm_s):
-    """mm/s -> 计数/控制窗口，与 fixp_mm_s_to_counts() 同一个式子（对称四舍五入）。"""
+    """mm/s -> counts per control window, same formula as fixp_mm_s_to_counts() (symmetric rounding)."""
     num = mm_s * COUNTS_PER_M * PERIOD_MS
     den = 1000 * 1000
     return (num + den // 2) // den if num >= 0 else -((-num + den // 2) // den)
 
 
 def open_port(path):
-    """与 test_stm32_link.py 完全相同的串口配置（那里已经实机验证过）。"""
+    """Exact same serial configuration as test_stm32_link.py (verified on the real device there)."""
     fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
     a = termios.tcgetattr(fd)
     a[0] = 0                                              # iflag : raw
@@ -76,10 +79,11 @@ def open_port(path):
 
 
 def drain(fd, seconds):
-    """读 seconds 秒内到达的全部字节（端口是 O_NONBLOCK，空读要自己让一下）。"""
+    """Read every byte that arrives within `seconds` (port is O_NONBLOCK, so yield manually when empty)."""
     out = b""
-    # ★ 用 monotonic 而不是 time.time()：后者会被 NTP 拉前/拉后，drain 就会
-    #   提前返回（读不完整）或者死等。test_stm32_link.py 里用的也是 monotonic。
+    # ★ Use monotonic rather than time.time(): the latter can jump forward/backward
+    #   due to NTP, making drain return early (incomplete read) or hang. test_stm32_link.py
+    #   also uses monotonic.
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         try:
@@ -98,15 +102,16 @@ SHADOW_STATE_RE = re.compile(r"shadow.*=\s*(ON|OFF)")
 
 
 def set_shadow(fd, want_on):
-    """把影子模式设成 want_on 并**校验**是否真的到位。
+    """Set shadow mode to want_on and **verify** that it really took effect.
 
-    ★ 固件的本地键 ``.s`` 是 **toggle**，不是幂等的：如果上次异常退出把影子留在
-    "开"，再发一次 ``.s`` 反而会把它**关掉** —— 然后四条 V 帧全部不打印
-    ``[SHADOW]`` 行，排查方向会被彻底带偏（会被误判成"影子模式坏了"）。
-    固件会把新状态打成 ``[U2] shadow (...) = ON/OFF``，所以这里读回来确认，
-    状态不对就再 toggle 一次，最多三轮。
+    ★ The firmware's local key ``.s`` is a **toggle**, not idempotent: if a previous
+    abnormal exit left shadow mode "on", sending ``.s`` again actually turns it
+    **off** -- then all four V frames stop printing ``[SHADOW]`` lines and the
+    investigation goes completely off track (it looks like "shadow mode is broken").
+    The firmware prints the new state as ``[U2] shadow (...) = ON/OFF``, so read it
+    back here and toggle again if the state is wrong, at most three rounds.
 
-    :returns: (是否达成, 最后一次 drain 到的文本)
+    :returns: (reached desired state, text captured by the last drain)
     """
     back = ""
     for _ in range(3):
@@ -135,14 +140,15 @@ def main():
     fd = open_port(DEV)
     time.sleep(0.3)
 
-    # ① 打开影子模式（本地键必须带 '.' 前缀，否则 's' 会被当成协议字节）
+    # 1) turn shadow mode on (the local key must carry the '.' prefix, or 's' is taken as a protocol byte)
     shadow_on, back = set_shadow(fd, True)
     print("--- shadow mode -> ON (verified=%s) ---" % ("YES" if shadow_on else "NO"))
     print(back if back.strip() else "(nothing)")
     print("")
     if not shadow_on:
-        print("!! 三次都没能确认影子模式已打开 —— 下面四条 V 帧大概率不会打印 [SHADOW]。")
-        print("!! 先在 COM9 上手动发 '.s'，确认回显是 '= ON'；再看固件是不是这一版。")
+        print("!! Could not confirm shadow mode turned on in three attempts -- the four V frames below")
+        print("!! most likely will not print [SHADOW]. First send '.s' by hand on COM9 and confirm the")
+        print("!! echo is '= ON'; then check whether the firmware is this version.")
         print("")
 
     ok = 0
@@ -159,7 +165,7 @@ def main():
                 print("      " + line)
         print("")
 
-    # ② 关掉影子模式，把台架恢复成基线状态
+    # 2) turn shadow mode off, restoring the bench to its baseline state
     shadow_off, back = set_shadow(fd, False)
     print("--- shadow mode -> OFF (verified=%s) ---" % ("YES" if shadow_off else "NO"))
     print(back if back.strip() else "(nothing)")

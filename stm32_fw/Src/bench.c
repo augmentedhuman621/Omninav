@@ -1,36 +1,41 @@
 /**
   ******************************************************************************
   * @file    Src/bench.c
-  * @brief   外设层台架测试：引脚探针 + 单电机开环驱动
+  * @brief   Peripheral-layer bench test: pin probe + single-motor open-loop drive
   *
-  *  ── 信号链 ────────────────────────────────────────────────────────────────
-  *   PE9  ── TIM1_CH1（AF 推挽，20 kHz PWM） ──► TB6612 `PWMA`   调速
-  *   PE7  ── 普通 GPIO 输出 ────────────────────► TB6612 `AIN1`   方向位 1
-  *   PE8  ── 普通 GPIO 输出 ────────────────────► TB6612 `AIN2`   方向位 0
-  *   PE15 ── 普通 GPIO 输出 ────────────────────► TB6612 `STBY`   置高才工作
-  *   AO1/AO2 ──────────────────────────────────► 电机 白线(M+) / 红线(M−)
+  *  -- Signal chain ---------------------------------------------------------
+  *   PE9  -- TIM1_CH1 (AF push-pull, 20 kHz PWM) --> TB6612 `PWMA`   speed
+  *   PE7  -- plain GPIO output ------------------> TB6612 `AIN1`   direction bit 1
+  *   PE8  -- plain GPIO output ------------------> TB6612 `AIN2`   direction bit 0
+  *   PE15 -- plain GPIO output ------------------> TB6612 `STBY`   high to enable
+  *   AO1/AO2 -----------------------------------> motor white (M+) / red (M-)
   *
-  *  ★ TIM1 走【完全重映射】（AFIO_MAPR.TIM1_REMAP = 11）：
+  *  NOTE: TIM1 uses FULL remap (AFIO_MAPR.TIM1_REMAP = 11):
   *         ETR=PE7  CH1=PE9  CH2=PE11  CH3=PE13  CH4=PE14
   *         BKIN=PE15  CH1N=PE8  CH2N=PE10  CH3N=PE12
-  *    重映射只是把"复用功能"挪到 PE 口上，**引脚不会自动变成复用**——
-  *    只有被你使能的那个通道才接管引脚。所以 PE7/PE8/PE15 依旧是普通 GPIO。
-  *       · PE7  = TIM1_ETR，ETR 要 SMCR.ECE=1 才生效 ⇒ 默认是 GPIO ✓
-  *       · PE8  = TIM1_CH1N，互补输出要 CCER.CC1NE=1 才生效 ⇒ 默认是 GPIO ✓
-  *       · PE15 = TIM1_BKIN，刹车输入要 BDTR.BKE=1 才生效 ⇒ 默认是 GPIO ✓
+  *    Remapping only moves the "alternate function" onto port E; the pin does
+  *    NOT become alternate-function automatically -- only the channel you
+  *    enable takes over the pin. So PE7/PE8/PE15 stay plain GPIO:
+  *       . PE7  = TIM1_ETR, ETR needs SMCR.ECE=1 to take effect => plain GPIO
+  *       . PE8  = TIM1_CH1N, complementary output needs CCER.CC1NE=1 =>
+  *                plain GPIO
+  *       . PE15 = TIM1_BKIN, brake input needs BDTR.BKE=1 => plain GPIO
   *
-  *  ── TB6612 真值表（Toshiba 数据手册，务必按这个记）───────────────────────
-  *   STBY=0                      → 待机，全桥高阻（**惰行/滑行**，唯一的"松"状态）
-  *   STBY=1, IN1=1, IN2=0, PWM>0 → 正转
-  *   STBY=1, IN1=0, IN2=1, PWM>0 → 反转
-  *   STBY=1, PWM=0（IN1≠IN2）    → **短路制动（刹车）** ← 不是滑行！
-  *   STBY=1, IN1=IN2（0 或 1）   → **短路制动（刹车）**
-  *   ★ 所以：想让车"停下来"用 PWM=0 / IN1=IN2=0（刹得住）；
-  *          想让车"自由滑行"**必须把 STBY 拉低**（急停走这一条）。
+  *  -- TB6612 truth table (Toshiba datasheet; memorize this) --------------
+  *   STBY=0                      -> standby, full bridge high-Z (**coast**,
+  *                                  the only "released" state)
+  *   STBY=1, IN1=1, IN2=0, PWM>0 -> forward
+  *   STBY=1, IN1=0, IN2=1, PWM>0 -> reverse
+  *   STBY=1, PWM=0 (IN1!=IN2)    -> **short-circuit brake** <- NOT coasting!
+  *   STBY=1, IN1=IN2 (0 or 1)    -> **short-circuit brake**
+  *   NOTE: to make the car "stop", use PWM=0 / IN1=IN2=0 (it brakes);
+  *         to make it "coast freely" you **must pull STBY low** (use this for
+  *         an emergency stop).
   *
-  *  ── ADC 型的"占空比表"────────────────────────────────────────────────────
-  *   万用表直流电压档量 PWM 引脚，读数是平均值 ≈ 3.3 V × 占空比。
-  *   20 kHz 远高于表头带宽，读数稳定。这正好是"不用示波器验证 PWM"的办法。
+  *  -- ADC-style "duty table" ----------------------------------------------
+  *   With a multimeter on DC volts across the PWM pin, the reading is the
+  *   average ~ 3.3 V x duty. 20 kHz is far above the meter bandwidth, so the
+  *   reading is stable. This is exactly how to verify PWM without a scope.
   ******************************************************************************
   */
 
@@ -38,24 +43,26 @@
 #include "main.h"
 
 extern UART_HandleTypeDef huart1;
-extern void uart_printf(const char *fmt, ...);   /* 定义在 main.c，自研实现，不支持 %f */
+extern void uart_printf(const char *fmt, ...);   /* Defined in main.c, custom implementation, no %f support */
 
 /* Private defines -----------------------------------------------------------*/
-#define PROBE_HALF_MS     250u   /* 250 ms 翻转一次 = 2 Hz 方波，表针看得清 */
-/* ★ 探针【不自动推进】：每个脚一直翻转，直到你在串口发一个字符才换下一个。
- *   原因：13 个脚 × 1.5 s = 20 s，人根本来不及用万用表逐个点完。
- *   操作：任意字符 = 下一个脚，'p' = 上一个脚，'q' = 跳过剩下的直接进阶段 C。 */
+#define PROBE_HALF_MS     250u   /* Toggle every 250 ms = 2 Hz square wave, easy to read on the needle */
+/* NOTE: the probe does [not auto-advance]: each pin keeps toggling until you
+ *   send one character on the UART. Reason: 13 pins x 1.5 s = 20 s, far too
+ *   fast to touch them all with a multimeter.
+ *   Controls: any char = next pin, 'p' = previous pin, 'q' = skip the rest and
+ *   go straight to stage C. */
 #define PWM_ARR          3599u   /* 72 MHz / (0+1) / (3599+1) = 20.000 kHz */
-#define DUTY_STEP           5u   /* 每次 +/- 调 5% */
-#define DUTY_MAX           90u   /* 封顶 90%，留余量 */
+#define DUTY_STEP           5u   /* +/- 5% per press */
+#define DUTY_MAX           90u   /* cap at 90%, keeps some margin */
 #define STATUS_MS         500u
 
 /* Private types -------------------------------------------------------------*/
 typedef struct
 {
-  const char   *mcu;    /* MCU 引脚名 */
-  const char   *silk;   /* TFT_LCD 排座上的丝印 */
-  const char   *pos;    /* 在排座上的物理位置（手工定位用） */
+  const char   *mcu;    /* MCU pin name */
+  const char   *silk;   /* silkscreen on the TFT_LCD header */
+  const char   *pos;    /* physical position on the header (for manual location) */
   GPIO_TypeDef *port;
   uint16_t      pin;
 } probe_pin_t;
@@ -63,10 +70,11 @@ typedef struct
 /* Private variables ---------------------------------------------------------*/
 static TIM_HandleTypeDef htim1;
 
-/* ★ 顺序 = PE7..PE15 再 PD0/PD1/PD8/PD9；
- *   silk 列是"排座上要去找的丝印"，依据是 FSMC 数据线固定映射：
- *   FSMC_D4..D12 = PE7..PE15（⇒ 丝印 D4..D12），FSMC_D2/D3 = PD0/PD1（丝印 D2/D3），
- *   FSMC_D13/D14 = PD8/PD9（丝印 D13/D14）。用探针实测来最终确认。 */
+/* NOTE: order = PE7..PE15 then PD0/PD1/PD8/PD9;
+ *   the silk column is "the silkscreen to look for on the header", based on the
+ *   fixed FSMC data-line mapping:
+ *   FSMC_D4..D12 = PE7..PE15 (=> silk D4..D12), FSMC_D2/D3 = PD0/PD1 (silk D2/D3),
+ *   FSMC_D13/D14 = PD8/PD9 (silk D13/D14). The probe measurement confirms it. */
 static const probe_pin_t g_probe[] =
 {
   { "PE7",  "D4",  "UPPER row, 5th from left",  GPIOE, GPIO_PIN_7  },
@@ -86,9 +94,9 @@ static const probe_pin_t g_probe[] =
 #define PROBE_N (sizeof(g_probe) / sizeof(g_probe[0]))
 
 static uint8_t g_duty;      /* 0..100 % */
-static uint8_t g_fwd;       /* 1 = 正转 */
-static uint8_t g_stby;      /* 1 = TB6612 使能 */
-static uint8_t g_brake;     /* 1 = 两个 IN 同时拉高（刹车） */
+static uint8_t g_fwd;       /* 1 = forward */
+static uint8_t g_stby;      /* 1 = TB6612 enabled */
+static uint8_t g_brake;     /* 1 = both IN pulled high (brake) */
 
 /* Private function prototypes -----------------------------------------------*/
 static void stage_a_heartbeat(void);
@@ -101,7 +109,7 @@ static void motor_help(void);
 static int  uart_getc(char *c);
 
 /* ==========================================================================
- *  入口
+ *  Entry
  * ========================================================================== */
 
 void bench_run(void)
@@ -110,14 +118,14 @@ void bench_run(void)
   stage_b_probe();
   stage_c_motor();
 
-  /* 理论到不了这里 */
+  /* Should never get here */
   while (1)
   {
   }
 }
 
 /* ==========================================================================
- *  阶段 A：心跳
+ *  Stage A: heartbeat
  * ========================================================================== */
 
 static void stage_a_heartbeat(void)
@@ -145,7 +153,7 @@ static void stage_a_heartbeat(void)
 }
 
 /* ==========================================================================
- *  阶段 B：引脚探针
+ *  Stage B: pin probe
  * ========================================================================== */
 
 static void stage_b_probe(void)
@@ -187,7 +195,7 @@ static void stage_b_probe(void)
                 g_probe[i].mcu, g_probe[i].silk, g_probe[i].pos);
     uart_printf("[B]     send any char for next, 'p' previous, 'q' skip rest\r\n");
 
-    /* 一直翻转这个脚，直到收到一个字符（回车换行不算） */
+    /* Keep toggling this pin until a character arrives (CR/LF ignored) */
     next_toggle = HAL_GetTick();
     for (;;)
     {
@@ -207,7 +215,7 @@ static void stage_b_probe(void)
       }
     }
 
-    /* 离开这个脚前先拉低，避免两个脚同时跳把人看花 */
+    /* Pull it low before leaving, so two pins never toggle at once and blur the reading */
     HAL_GPIO_WritePin(g_probe[i].port, g_probe[i].pin, GPIO_PIN_RESET);
 
     if (c == 'q')
@@ -232,7 +240,7 @@ static void stage_b_probe(void)
     }
   }
 
-  /* 收尾：所有探针脚拉低，交还干净状态给阶段 C */
+  /* Wrap up: pull all probe pins low and hand a clean state to stage C */
   for (i = 0u; i < PROBE_N; i++)
   {
     HAL_GPIO_WritePin(g_probe[i].port, g_probe[i].pin, GPIO_PIN_RESET);
@@ -243,7 +251,7 @@ static void stage_b_probe(void)
 }
 
 /* ==========================================================================
- *  阶段 C：单电机开环驱动
+ *  Stage C: single-motor open-loop drive
  * ========================================================================== */
 
 static void motor_init(void)
@@ -252,28 +260,28 @@ static void motor_init(void)
   TIM_OC_InitTypeDef      oc = {0};
   TIM_MasterConfigTypeDef mc = {0};
 
-  /* AFIO 时钟必须先开，重映射寄存器才写得进去 */
+  /* The AFIO clock must be enabled first, or the remap register cannot be written */
   __HAL_RCC_AFIO_CLK_ENABLE();
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_TIM1_CLK_ENABLE();
 
-  /* TIM1 完全重映射：CH1=PE9 CH2=PE11 CH3=PE13 CH4=PE14 */
+  /* TIM1 full remap: CH1=PE9 CH2=PE11 CH3=PE13 CH4=PE14 */
   __HAL_AFIO_REMAP_TIM1_ENABLE();
 
-  /* PE9 = TIM1_CH1，复用推挽 */
+  /* PE9 = TIM1_CH1, alternate-function push-pull */
   g.Pin   = GPIO_PIN_9;
   g.Mode  = GPIO_MODE_AF_PP;
   g.Pull  = GPIO_NOPULL;
   g.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOE, &g);
 
-  /* PE7 = AIN1 / PE8 = AIN2 / PE15 = STBY，普通推挽输出 */
+  /* PE7 = AIN1 / PE8 = AIN2 / PE15 = STBY, plain push-pull outputs */
   g.Mode   = GPIO_MODE_OUTPUT_PP;
   g.Speed  = GPIO_SPEED_FREQ_LOW;
   g.Pin    = GPIO_PIN_7 | GPIO_PIN_8 | GPIO_PIN_15;
   HAL_GPIO_Init(GPIOE, &g);
 
-  /* 上电先让 TB6612 处于待机，电机不通电 */
+  /* Start with TB6612 in standby, motor unpowered */
   HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7 | GPIO_PIN_8, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOE, GPIO_PIN_15, GPIO_PIN_RESET);
 
@@ -299,7 +307,8 @@ static void motor_init(void)
   mc.MasterSlaveMode     = TIM_MASTERSLAVEMODE_DISABLE;
   (void)HAL_TIMEx_MasterConfigSynchronization(&htim1, &mc);
 
-  /* ★ 配置完必须显式 Start，否则 GPIO 上永远没有波形（最经典的坑） */
+  /* NOTE: PWM must be started explicitly after configuration, otherwise there
+   * is never a waveform on the pin (the classic pitfall) */
   (void)HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
 
   g_duty  = 0u;
@@ -316,7 +325,8 @@ static void motor_apply(void)
 
   if (g_stby == 0u)
   {
-    /* 待机：TB6612 全桥高阻，方向位给什么都不动，但保持 0 更省心 */
+    /* Standby: TB6612 full bridge is high-Z, it does not move whatever the
+     * direction bits are, but holding them 0 is cleaner */
     in1 = GPIO_PIN_RESET;
     in2 = GPIO_PIN_RESET;
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_15, GPIO_PIN_RESET);
@@ -327,7 +337,7 @@ static void motor_apply(void)
 
     if (g_brake != 0u)
     {
-      in1 = GPIO_PIN_SET;       /* 两个 IN 同时高 ⇒ 短路制动 */
+      in1 = GPIO_PIN_SET;       /* Both IN high => short-circuit brake */
       in2 = GPIO_PIN_SET;
     }
     else if (g_fwd != 0u)
@@ -380,18 +390,19 @@ static void stage_c_motor(void)
   uart_printf("PE9=TIM1_CH1 PWM 20kHz (silk D6)  PE7=AIN1 (D4)  PE8=AIN2 (D5)  PE15=STBY (D12)\r\n");
 
   /*
-   * ── 接线（TB6612 A 路）────────────────────────────────────────────────
-   *   TB6612 VM   -> 电池正极（经总开关）        ★ 绝不接开发板 5V
-   *   TB6612 VCC  -> 精英板 3.3V
-   *   TB6612 GND  -> 精英板 GND（★ 必须与电池共地）
-   *   TB6612 PWMA -> PE9   (TFT_LCD 座丝印 D6)
-   *   TB6612 AIN1 -> PE7   (丝印 D4)
-   *   TB6612 AIN2 -> PE8   (丝印 D5)
-   *   TB6612 STBY -> PE15  (丝印 D12)
-   *   TB6612 AO1  -> 电机白线 (M+)
-   *   TB6612 AO2  -> 电机红线 (M-)
-   *   VM 与 GND 之间并 100~470uF 电解 + 0.1uF 陶瓷
-   * ────────────────────────────────────────────────────────────────────
+   * -- Wiring (TB6612 channel A) ----------------------------------------
+   *   TB6612 VM   -> battery positive (through the main switch)
+   *                  NOTE: never connect this to the dev board 5V
+   *   TB6612 VCC  -> Elite board 3.3V
+   *   TB6612 GND  -> Elite board GND (NOTE: must share ground with battery)
+   *   TB6612 PWMA -> PE9   (TFT_LCD header silk D6)
+   *   TB6612 AIN1 -> PE7   (silk D4)
+   *   TB6612 AIN2 -> PE8   (silk D5)
+   *   TB6612 STBY -> PE15  (silk D12)
+   *   TB6612 AO1  -> motor white wire (M+)
+   *   TB6612 AO2  -> motor red wire (M-)
+   *   Add 100~470uF electrolytic + 0.1uF ceramic between VM and GND
+   * --------------------------------------------------------------------
    */
 
   motor_init();
@@ -497,12 +508,12 @@ static void stage_c_motor(void)
 }
 
 /**
-  * @brief  非阻塞读一个串口字节（轮询，不占用中断向量）
-  * @retval 1 = 读到；0 = 没有
+  * @brief  Non-blocking read of one UART byte (polling, no interrupt vector)
+  * @retval 1 = received; 0 = nothing
   */
 static int uart_getc(char *c)
 {
-  /* 溢出错误要先清掉，否则 RXNE 再也不置位 */
+  /* Clear an overrun error first, otherwise RXNE never gets set again */
   if (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_ORE) != RESET)
   {
     volatile uint32_t tmp;

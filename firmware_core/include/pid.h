@@ -1,59 +1,59 @@
 /*
- * pid.h — 速度环 PID（纯整数，Q16 增益）
+ * pid.h — velocity-loop PID (pure integer, Q16 gains)
  * ---------------------------------------------------------------------------
  *
- * 设计约束（与本项目 firmware_core 的铁律一致）
- *   - 只 include <stdint.h>。不许 HAL / ROS2 / 第三方 / <stdio.h> / <math.h>。
- *   - 全整数零浮点。增益用 Q16 表示（寄存器里的整数 = 真实值 × 65536）。
- *   - 无动态内存、无全局可变状态、无递归。
- *   - 状态全部放在调用者给的 pid_state_t 里 —— 四路轮子就是四个实例，
- *     不需要也不允许模块级全局量。
+ * Design constraints (consistent with the iron rules of this project's firmware_core)
+ *   - Depends only on <stdint.h>. No HAL / ROS2 / third-party headers, no <stdio.h> / <math.h>.
+ *   - All-integer, zero floating-point. Gains are Q16 (the stored integer = real value × 65536).
+ *   - No dynamic memory, no global mutable state, no recursion.
+ *   - All state lives in the caller-provided pid_state_t — four wheels are four instances,
+ *     so module-level globals are neither needed nor allowed.
  *
- * 单位约定（跨模块统一，见 STM32_README.md §5）
- *   设定值 / 反馈值 : mm/s（int32_t）
- *   输出           : 「PWM 单位」，对称范围通常 -1000 ~ +1000（int32_t）
- *   误差 e = setpoint - meas，单位 mm/s
+ * Unit conventions (unified across modules, see STM32_README.md §5)
+ *   setpoint / feedback : mm/s (int32_t)
+ *   output              : "PWM units", symmetric range usually -1000 ~ +1000 (int32_t)
+ *   error e = setpoint - meas, in mm/s
  *
- * 为什么增益用 Q16 而不是整数比值
- *   速度环的 kp 典型量级是 0.1 ~ 2.0。用整数比值表达不了 0.35 这种值；
- *   用 Q16 后 0.35 就是 22938，全部运算落在 int64 中间量上，既精确又无溢出。
+ * Why Q16 gains instead of integer ratios
+ *   Velocity-loop kp is typically 0.1 ~ 2.0. Integer ratios cannot express a value like 0.35;
+ *   with Q16, 0.35 is 22938 and all arithmetic runs on int64 intermediates: exact, no overflow.
  *
- * 三项各自的处理（每一处都是刻意的，不是默认写法）
+ * How each of the three terms is handled (every choice is deliberate, not a default)
  *   P : p_term   = (kp_q16 * e) >> 16
- *   I : 累加器存「误差的原始和」Σe（单位 mm/s·次），而不是已经乘过 ki 的
- *       结果 —— 这样改动 ki 不会污染历史累积，且小 ki 不会因取整被吃掉。
- *       积分项 i_term = (ki_q16 * integ_raw) >> 16，并单独限幅。
- *   D : ★ 微分作用在「测量值」上，不在误差上（derivative-on-measurement）：
+ *   I : the accumulator stores the raw sum of errors Σe (unit mm/s·tick), not a value already
+ *       multiplied by ki — this way changing ki does not poison the history, and a small ki
+ *       is not lost to rounding. The integral term i_term = (ki_q16 * integ_raw) >> 16, clamped separately.
+ *   D : ★ the derivative acts on the measurement, not on the error (derivative-on-measurement):
  *       d_term = (kd_q16 * (-(meas - prev_meas))) >> 16
- *       这样设定值突变时不会产生微分尖峰（derivative kick）。
- *       代价是设定值斜坡跟踪时少了一点超前，速度环里这个取舍是标准的。
+ *       this way a step in the setpoint produces no derivative kick.
+ *       The cost is slightly less lead during setpoint ramps; in a velocity loop that trade-off is standard.
  *
- * 抗积分饱和（三重，缺一不可）
- *   1) 积分项单独限幅 integ_limit —— 防止积分项本身把输出顶死。
- *   2) 积分分离：|e| > integ_sep_mm_s 时暂停积分 —— 大偏差阶段（起步、
- *      阶跃）本来就不该积分；这同时是最省事的抗超调手段。
- *   3) 条件积分（clamping）：本步算出的输出若已饱和、且误差方向还在把
- *      输出往饱和深处推，则**回滚**这一步的积分累加。
- *      —— 没有第 3 条时，指令长期超出物理可达范围会让积分涨到天上，
- *         等指令反向时车要先「等积分退出来」才动，表现为长时间不响应。
+ * Anti-windup (three layers, all of them required)
+ *   1) The integral term is clamped on its own (integ_limit) — stops the integral term from pinning the output.
+ *   2) Integral separation: suspend integration while |e| > integ_sep_mm_s — during large errors (start-up,
+ *      steps) integration should not be running anyway; this is also the cheapest anti-overshoot tool.
+ *   3) Conditional integration (clamping): if this step's output is saturated and the error still pushes
+ *      deeper into saturation, **roll back** this step's integral accumulation.
+ *      — without layer 3, a command persistently beyond the physical range winds the integral up to the sky,
+ *        and when the command reverses the robot must first "wait for the integral to unwind", i.e. it looks unresponsive.
  *
- * 饱和标志
- *   pid_step() 通过 flags 回传本步发生的事，供上层记日志 / 判 PWM 使能：
- *     PID_FLAG_SATURATED   输出**顶在限幅边界上**（out >= out_max 或
- *                          out <= out_min）。语义取「已到轨」而不是
- *                          「本步被削掉」——因为对上层而言，恰好落在边界
- *                          （out_raw == out_max）与真正越界一样，都意味着
- *                          「误差再大也推不动了」，这正是判 PWM 满占空比
- *                          与上报 `A,<text>` 时想要的信息。
- *                          注意：抗积分饱和（下面第 3 条）用的是更严格的
- *                          「out_raw 真的越界」判据，两者不是一回事。
- *     PID_FLAG_INTEG_FROZEN 本步积分被回滚（条件积分触发）
- *     PID_FLAG_INTEG_SEP   本步因积分分离而暂停积分
- *   flags 允许为 NULL。
+ * Saturation flags
+ *   pid_step() reports what happened this step through flags, for logging / PWM-enable decisions upstream:
+ *     PID_FLAG_SATURATED   the output is **pinned at the clamp boundary** (out >= out_max or
+ *                          out <= out_min). The semantics are "at the rail", not
+ *                          "clipped this step" — for the layer above, landing exactly on the boundary
+ *                          (out_raw == out_max) and genuinely exceeding it both mean
+ *                          "no larger error can push it further", which is exactly the information
+ *                          needed for full-duty PWM and `A,<text>` reporting.
+ *                          Note: anti-windup (layer 3 below) uses the stricter
+ *                          "out_raw genuinely out of range" test; the two are not the same thing.
+ *     PID_FLAG_INTEG_FROZEN the integral was rolled back this step (conditional integration fired)
+ *     PID_FLAG_INTEG_SEP   integration was suspended this step by integral separation
+ *   flags may be NULL.
  *
- * 溢出与取值范围（内部一律 int64 中间量）
- *   |e| <= 2^20（约 100 万 mm/s，远超实际）
- *   |integ_raw| 被限幅在 integ_bound 内，见 pid.c
+ * Overflow and value ranges (int64 intermediates throughout)
+ *   |e| <= 2^20 (about 1 million mm/s, far beyond anything real)
+ *   |integ_raw| is clamped to integ_bound, see pid.c
  *   |out| <= max(|out_min|, |out_max|)
  */
 
@@ -66,53 +66,53 @@
 extern "C" {
 #endif
 
-/* Q16 的 1.0 */
+/* Q16 representation of 1.0 */
 #define PID_Q16_ONE 65536
 
-/* pid_step() 回传的标志位 */
+/* Flags reported by pid_step() */
 #define PID_FLAG_SATURATED    0x01u
 #define PID_FLAG_INTEG_FROZEN 0x02u
 #define PID_FLAG_INTEG_SEP    0x04u
 
-/* 增益与限幅配置。全部是「数据」，标定只改数字，不动算法。 */
+/* Gain and clamp configuration. Pure "data": calibration changes numbers only, never the algorithm. */
 typedef struct {
-    int32_t kp_q16;          /* 比例增益，Q16 */
-    int32_t ki_q16;          /* 积分增益，Q16；0 = 关闭积分 */
-    int32_t kd_q16;          /* 微分增益，Q16；0 = 关闭微分 */
-    int32_t out_min;         /* 输出下限（通常 -1000）。必须 < out_max */
-    int32_t out_max;         /* 输出上限（通常 +1000） */
-    int32_t integ_sep_mm_s;  /* 积分分离阈值：|e| 大于它则暂停积分；<=0 表示不分离 */
-    int32_t integ_limit;     /* 积分项输出的绝对值上限；<=0 表示用 out_max/-out_min 推导 */
+    int32_t kp_q16;          /* proportional gain, Q16 */
+    int32_t ki_q16;          /* integral gain, Q16; 0 = integration off */
+    int32_t kd_q16;          /* derivative gain, Q16; 0 = derivative off */
+    int32_t out_min;         /* output lower clamp (usually -1000). Must be < out_max */
+    int32_t out_max;         /* output upper clamp (usually +1000) */
+    int32_t integ_sep_mm_s;  /* integral separation: suspend integration while |e| is above it; <=0 = off */
+    int32_t integ_limit;     /* absolute clamp on the integral term; <=0 = derive from out_max/-out_min */
 } pid_gains_t;
 
-/* 一个控制通道的运行状态。四路轮子 = 四个独立实例。 */
+/* Run-time state of one control channel. Four wheels = four independent instances. */
 typedef struct {
-    int64_t integ_raw;  /* Σe，单位 mm/s·次 */
-    int32_t prev_meas;  /* 上一步的反馈值，用于微分项 */
-    uint8_t started;    /* 0 = 还没跑过第一步（微分项按 0 处理） */
+    int64_t integ_raw;  /* Σe, unit mm/s·tick */
+    int32_t prev_meas;  /* previous feedback value, used by the derivative term */
+    uint8_t started;    /* 0 = first step not taken yet (derivative term treated as 0) */
 } pid_state_t;
 
-/* 默认增益：kp = 0.5, ki = 1/50 = 0.02, kd = 0，输出 ±1000。
- * ！！这些只是让固件能跑起来的起点，实车必须整定。 */
+/* Default gains: kp = 0.5, ki = 1/50 = 0.02, kd = 0, output ±1000.
+ * !! These are only a starting point to get the firmware running; they must be tuned on the real robot. */
 pid_gains_t pid_default_gains(void);
 
-/* 清零状态。允许 st 为 0（空操作）。 */
+/* Clear the state. st may be 0 (no-op). */
 void pid_reset(pid_state_t *st);
 
 /*
- * 参数合法性：out_min < out_max、三个增益非负、integ_sep_mm_s 与
- * integ_limit 允许为 0 / 负数（表示关闭）。
- * 返回 1 = 合法。
+ * Parameter validity: out_min < out_max, all three gains non-negative, and
+ * integ_sep_mm_s / integ_limit may be 0 or negative (meaning off).
+ * Returns 1 if valid.
  */
 int pid_gains_is_valid(const pid_gains_t *g);
 
 /*
- * 跑一步。返回限幅后的输出。
- *   g / st 为 0 时返回 0（不崩、不写任何东西）。
- *   flags 允许为 0。
- *   setpoint / meas 单位 mm/s。
+ * Run one step. Returns the clamped output.
+ *   Returns 0 when g / st is 0 (no crash, nothing written).
+ *   flags may be 0.
+ *   setpoint / meas are in mm/s.
  *
- * 本函数是纯状态机：同样输入序列 → 同样输出序列，与调用时刻无关。
+ * This function is a pure state machine: same input sequence → same output sequence, independent of call time.
  */
 int32_t pid_step(const pid_gains_t *g, pid_state_t *st,
                  int32_t setpoint, int32_t meas, uint32_t *flags);

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Q-01 审计脚本：在 WSL Ubuntu-22.04 里真实执行 firmware_core 的 check-purity / lib / test / test-asan
-# 只读工作区源码与既有 build/ 产物；不改实现代码、不删除既有产物。
-# 用法：wsl -d Ubuntu-22.04 -- bash /mnt/d/dsh/工程设计/qa/run_core_tests.sh
+# Q-01 audit script: really run firmware_core's check-purity / lib / test / test-asan in WSL Ubuntu-22.04
+# Read-only on workspace source and existing build/ artifacts; does not modify implementation code or delete existing artifacts.
+# Usage: wsl -d Ubuntu-22.04 -- bash <repo>/qa/run_core_tests.sh
 set -o pipefail
-WS=/mnt/d/dsh/工程设计
+WS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FD=$WS/firmware_core
 EVID=$WS/qa/evidence
 mkdir -p "$EVID"

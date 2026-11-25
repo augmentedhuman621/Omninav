@@ -1,33 +1,33 @@
 /*
- * mecanum.c — 四麦克纳姆轮运动学实现
+ * mecanum.c -- four-mecanum-wheel kinematics implementation
  *
- * 纯整数、零依赖：本文件只 include "mecanum.h"（后者只 include <stdint.h>）。
- * 不 include HAL / ROS2 / 任何第三方头。无浮点，无动态内存，无全局状态。
+ * Integer-only, zero dependencies: this file only includes "mecanum.h" (which only includes <stdint.h>).
+ * No HAL / ROS2 / third-party includes. No floating point, no dynamic memory, no global state.
  */
 
 #include "mecanum.h"
 
 /* ------------------------------------------------------------------ */
-/* 符号表（顺序 FL, FR, RL, RR）                                        */
-/* 来历见 mecanum.h 文件头：S_VY 的 ±1 就是 Adamov 模型里的 tan(delta)，  */
-/* delta = ±45 度。这两张表已与 ROS2 / WPILib / minimec / akkexd 核对。 */
+/* Sign tables (order FL, FR, RL, RR)                                 */
+/* See the mecanum.h file header for the derivation: the +/-1 in S_VY is tan(delta),  */
+/* with delta = +/-45 degrees. Both tables were cross-checked against ROS2 / WPILib / minimec / akkexd. */
 /* ------------------------------------------------------------------ */
 
 static const int8_t k_s_vy[MECANUM_WHEEL_COUNT]  = { -1, +1, +1, -1 };
 static const int8_t k_s_omg[MECANUM_WHEEL_COUNT] = { -1, +1, -1, +1 };
 
-/* 取整用的常数 */
+/* Rounding constant */
 #define MECANUM_MRAD_PER_RAD 1000
 
 /* ------------------------------------------------------------------ */
-/* 内部工具                                                            */
+/* Internal helpers                                                   */
 /* ------------------------------------------------------------------ */
 
 /*
- * 对称四舍五入（round half away from zero）。
- * 选它而不是 C 的整数除法（向零截断），是因为截断会引入符号相关的偏差，
- * 让正反转的误差不对称。要求 den > 0；用 int64 中间量，故 num 为
- * INT32_MIN 时也不会溢出（这是相对 32 位版本的一个实际改进）。
+ * Symmetric rounding (round half away from zero).
+ * Preferred over C integer division (truncation toward zero): truncation adds a
+ * sign-dependent bias that makes forward/reverse errors asymmetric. den > 0 is
+ * required; int64 intermediates keep num = INT32_MIN from overflowing.
  */
 static int32_t div_round(int64_t num, int64_t den)
 {
@@ -37,13 +37,13 @@ static int32_t div_round(int64_t num, int64_t den)
     return (int32_t)(-((-num + den / 2) / den));
 }
 
-/* 按极性翻转。极性只允许 ±1。 */
+/* Flip by polarity. Polarity may only be +/-1. */
 static int32_t apply_polarity(int8_t pol, int32_t v)
 {
     return (pol < 0) ? -v : v;
 }
 
-/* 四轮绝对值的峰值，永不为负。用 int64 以免 INT32_MIN 取负时溢出。 */
+/* Peak of the four wheel magnitudes, never negative. int64 avoids overflow when negating INT32_MIN. */
 static int64_t wheels_peak_abs(const mecanum_wheels_t *w)
 {
     int64_t peak = 0;
@@ -68,7 +68,7 @@ static void copy_wheels(const mecanum_wheels_t *src, mecanum_wheels_t *dst)
     }
 }
 
-/* 四轮同比例缩放到目标峰值。调用者保证 peak > 0 且 new_peak > 0。 */
+/* Scale all four wheels by the same ratio to a target peak. Caller guarantees peak > 0 and new_peak > 0. */
 static void scale_wheels_to_peak(const mecanum_wheels_t *in, int32_t new_peak,
                                  int64_t peak, mecanum_wheels_t *out)
 {
@@ -80,14 +80,14 @@ static void scale_wheels_to_peak(const mecanum_wheels_t *in, int32_t new_peak,
 }
 
 /* ------------------------------------------------------------------ */
-/* 默认值与清零                                                        */
+/* Defaults and zeroing                                               */
 /* ------------------------------------------------------------------ */
 
 mecanum_geom_t mecanum_default_geom(void)
 {
     mecanum_geom_t g;
-    g.half_wheelbase_mm = 150; /* 占位，必须实测 */
-    g.half_track_mm     = 150; /* 占位，必须实测 */
+    g.half_wheelbase_mm = 150; /* placeholder, must be measured */
+    g.half_track_mm     = 150; /* placeholder, must be measured */
     g.vy_polarity       = 1;
     g.omega_polarity    = 1;
     return g;
@@ -95,7 +95,7 @@ mecanum_geom_t mecanum_default_geom(void)
 
 mecanum_mount_t mecanum_identity_mount(void)
 {
-    mecanum_mount_t m = { { 0 }, { 0 } }; /* 先整体清零，杜绝“可能未初始化”告警 */
+    mecanum_mount_t m = { { 0 }, { 0 } }; /* zero everything first to avoid "may be uninitialized" warnings */
     int i;
     for (i = 0; i < MECANUM_WHEEL_COUNT; ++i) {
         m.motor_of_wheel[i] = (uint8_t)i;
@@ -107,8 +107,8 @@ mecanum_mount_t mecanum_identity_mount(void)
 mecanum_limits_t mecanum_default_limits(void)
 {
     mecanum_limits_t l;
-    l.wheel_max_mm_s      = 1000; /* 占位，必须按实测最高轮速替换 */
-    l.wheel_deadzone_mm_s = 0;    /* 默认关闭死区补偿 */
+    l.wheel_max_mm_s      = 1000; /* placeholder, replace with the measured top wheel speed */
+    l.wheel_deadzone_mm_s = 0;    /* deadzone compensation off by default */
     return l;
 }
 
@@ -133,7 +133,7 @@ void mecanum_zero_wheels(mecanum_wheels_t *out)
 }
 
 /* ------------------------------------------------------------------ */
-/* 参数校验                                                            */
+/* Parameter validation                                               */
 /* ------------------------------------------------------------------ */
 
 int mecanum_geom_is_valid(const mecanum_geom_t *g)
@@ -144,7 +144,7 @@ int mecanum_geom_is_valid(const mecanum_geom_t *g)
     if (g->half_wheelbase_mm < 0 || g->half_track_mm < 0) {
         return 0;
     }
-    /* L 必须 >= 1：正解要除以 4L，L = 0 会除零。 */
+    /* L must be >= 1: forward kinematics divides by 4L, so L = 0 divides by zero. */
     if (g->half_wheelbase_mm + g->half_track_mm < 1) {
         return 0;
     }
@@ -174,7 +174,7 @@ int mecanum_mount_is_valid(const mecanum_mount_t *m)
             return 0;
         }
         if (seen[mi] != 0) {
-            return 0; /* 有两路轮子映射到同一路电机 => 不是双射 */
+            return 0; /* two wheels map to one motor => not a bijection */
         }
         seen[mi] = 1;
         if (m->sign_of_wheel[i] != 1 && m->sign_of_wheel[i] != -1) {
@@ -193,7 +193,7 @@ int32_t mecanum_l_mm(const mecanum_geom_t *g)
 }
 
 /* ------------------------------------------------------------------ */
-/* 逆解                                                                */
+/* Inverse kinematics                                                 */
 /* ------------------------------------------------------------------ */
 
 void mecanum_inverse(const mecanum_geom_t *g, const mecanum_twist_t *twist,
@@ -214,7 +214,7 @@ void mecanum_inverse(const mecanum_geom_t *g, const mecanum_twist_t *twist,
 
     l = g->half_wheelbase_mm + g->half_track_mm;
     if (l < 1) {
-        /* 几何非法：宁可不走，也不要除零或给出无意义的轮速。 */
+        /* Invalid geometry: better to stand still than divide by zero or emit meaningless wheel speeds. */
         mecanum_zero_wheels(out);
         return;
     }
@@ -232,7 +232,7 @@ void mecanum_inverse(const mecanum_geom_t *g, const mecanum_twist_t *twist,
 }
 
 /* ------------------------------------------------------------------ */
-/* 正解（最小二乘伪逆）                                                 */
+/* Forward kinematics (least-squares pseudo-inverse)                  */
 /* ------------------------------------------------------------------ */
 
 void mecanum_forward(const mecanum_geom_t *g, const mecanum_wheels_t *wheels,
@@ -277,7 +277,7 @@ void mecanum_forward(const mecanum_geom_t *g, const mecanum_wheels_t *wheels,
 }
 
 /* ------------------------------------------------------------------ */
-/* 饱和归一                                                            */
+/* Saturation normalization                                           */
 /* ------------------------------------------------------------------ */
 
 int mecanum_desaturate(const mecanum_wheels_t *in, int32_t limit_abs_mm_s,
@@ -308,7 +308,7 @@ int mecanum_desaturate(const mecanum_wheels_t *in, int32_t limit_abs_mm_s,
 }
 
 /* ------------------------------------------------------------------ */
-/* 死区抬升                                                            */
+/* Deadzone lift                                                      */
 /* ------------------------------------------------------------------ */
 
 int mecanum_lift_deadzone(const mecanum_wheels_t *in, int32_t deadzone_abs_mm_s,
@@ -331,8 +331,8 @@ int mecanum_lift_deadzone(const mecanum_wheels_t *in, int32_t deadzone_abs_mm_s,
     peak = wheels_peak_abs(in);
 
     /*
-     * 安全硬约束：四轮全零就是「停车指令」，绝不能被抬起来。
-     * 若这里返回放大结果，静止的车会自己开始走。
+     * Hard safety constraint: all four wheels at zero is a "stop command" and must
+     * never be lifted; an amplified result here would make a stationary robot move.
      */
     if (peak == 0) {
         copy_wheels(in, out);
@@ -349,7 +349,7 @@ int mecanum_lift_deadzone(const mecanum_wheels_t *in, int32_t deadzone_abs_mm_s,
 }
 
 /* ------------------------------------------------------------------ */
-/* 装配映射                                                            */
+/* Mount mapping                                                      */
 /* ------------------------------------------------------------------ */
 
 void mecanum_apply_mount(const mecanum_mount_t *m, const mecanum_wheels_t *wheels,
@@ -371,7 +371,7 @@ void mecanum_apply_mount(const mecanum_mount_t *m, const mecanum_wheels_t *wheel
         uint8_t mi = m->motor_of_wheel[i];
         int32_t v;
         if (mi >= MECANUM_WHEEL_COUNT) {
-            continue; /* 映射表非法：该轮丢弃，其余仍按表走 */
+            continue; /* illegal mapping table: drop this wheel, apply the rest */
         }
         v = wheels->wheel_mm_s[i];
         motor_mm_s[mi] = (m->sign_of_wheel[i] < 0) ? -v : v;
@@ -404,7 +404,7 @@ void mecanum_undo_mount(const mecanum_mount_t *m,
 }
 
 /* ------------------------------------------------------------------ */
-/* 一键求解                                                            */
+/* One-shot solve                                                     */
 /* ------------------------------------------------------------------ */
 
 void mecanum_solve(const mecanum_geom_t *g, const mecanum_limits_t *lim,
@@ -452,7 +452,7 @@ void mecanum_solve(const mecanum_geom_t *g, const mecanum_limits_t *lim,
 }
 
 /* ------------------------------------------------------------------ */
-/* 与 ROS2 的轮序互换                                                  */
+/* Wheel-order swap with ROS2                                         */
 /* ------------------------------------------------------------------ */
 
 void mecanum_wheels_from_ros2_order(const int32_t ros2_in[MECANUM_WHEEL_COUNT],
@@ -465,7 +465,7 @@ void mecanum_wheels_from_ros2_order(const int32_t ros2_in[MECANUM_WHEEL_COUNT],
         mecanum_zero_wheels(out);
         return;
     }
-    /* ROS2 顺序：0=FL, 1=FR, 2=RR, 3=RL */
+    /* ROS2 order: 0=FL, 1=FR, 2=RR, 3=RL */
     out->wheel_mm_s[MECANUM_FL] = ros2_in[0];
     out->wheel_mm_s[MECANUM_FR] = ros2_in[1];
     out->wheel_mm_s[MECANUM_RR] = ros2_in[2];
@@ -485,7 +485,7 @@ void mecanum_wheels_to_ros2_order(const mecanum_wheels_t *in,
         ros2_out[3] = 0;
         return;
     }
-    /* ROS2 顺序：0=FL, 1=FR, 2=RR, 3=RL */
+    /* ROS2 order: 0=FL, 1=FR, 2=RR, 3=RL */
     ros2_out[0] = in->wheel_mm_s[MECANUM_FL];
     ros2_out[1] = in->wheel_mm_s[MECANUM_FR];
     ros2_out[2] = in->wheel_mm_s[MECANUM_RR];

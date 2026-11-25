@@ -1,19 +1,24 @@
 /**
   ******************************************************************************
   * @file    Inc/bench.h
-  * @brief   外设层台架测试（引脚探针 + 单电机开环驱动）
+  * @brief   Peripheral-layer bench test (pin probe + single-motor open-loop drive)
   *
-  *          目标板：正点原子 STM32F103ZE 精英板 V2
+  *          Target board: ALIENTEK STM32F103ZE Elite board V2
   *
-  *          三段阶梯：
-  *            A 心跳     —— 证明固件在跑（板载 LED0=PB5 / LED1=PE5 翻转）
-  *            B 引脚探针 —— PE7…PE15 / PD0 / PD1 / PD8 / PD9 依次 1 Hz 翻转，
-  *                          串口报出"现在翻转的是哪个脚"，用于在 TFT_LCD 排座上
-  *                          用万用表把「MCU 引脚名 ↔ 排座丝印」一一对上
-  *            C 单电机   —— PE9 = TIM1_CH1 20 kHz PWM，PE7/PE8 控方向，
-  *                          PE15 = TB6612 STBY；用串口单字符命令操作
+  *          Three stages:
+  *            A heartbeat    -- proves the firmware is running (on-board
+  *                              LED0=PB5 / LED1=PE5 toggle)
+  *            B pin probe    -- PE7...PE15 / PD0 / PD1 / PD8 / PD9 toggle at
+  *                              1 Hz in turn; the UART reports which pin is
+  *                              being toggled so that a multimeter on the
+  *                              TFT_LCD header can map "MCU pin name <->
+  *                              header silkscreen" one by one
+  *            C single motor -- PE9 = TIM1_CH1 20 kHz PWM, PE7/PE8 control the
+  *                              direction, PE15 = TB6612 STBY; operated with
+  *                              single-character UART commands
   *
-  *          ★ 全程不依赖任何外部模块，不需要先接线就能跑 A 和 B。
+  *          NOTE: No external module is required; stages A and B run without
+  *          any wiring.
   ******************************************************************************
   */
 
@@ -27,7 +32,7 @@ extern "C" {
 #include "stm32f1xx_hal.h"
 
 /**
-  * @brief  跑完三段阶梯（内部是死循环，永不返回）
+  * @brief  Run all three stages (infinite loop inside, never returns)
   */
 void bench_run(void);
 

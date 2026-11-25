@@ -3,7 +3,7 @@
 <package format="3">
   <name>omninav_sim</name>
   <version>0.1.0</version>
-  <description>OmniNav 麦轮车 Gazebo Classic 仿真包（几何体近似 + planar_move 全向驱动 + 2D 雷达）</description>
+  <description>OmniNav mecanum-wheel robot Gazebo Classic simulation package (primitive-geometry approximation + planar_move omnidirectional drive + 2D lidar)</description>
   <maintainer email="lead@omninav.local">OmniNav</maintainer>
   <license>MIT</license>
 

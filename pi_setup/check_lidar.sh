@@ -1,48 +1,57 @@
 #!/usr/bin/env bash
 # =============================================================================
-# OmniNav · check_lidar.sh —— 树莓派上"激光雷达能不能出数据"的只读诊断
+# OmniNav · check_lidar.sh -- read-only diagnosis: "does the lidar produce data"
+# on the Raspberry Pi
 # -----------------------------------------------------------------------------
-# 做什么（逐段打印，最后给结论）：
-#   0 基础信息 / 1 权限与 dialout / 2 USB 枚举 / 3 设备节点与 udev /
-#   4 CH340 与型号线索 / 5 驱动包是否已装 / 6 启动命令参考（只打印不执行）/
-#   7 被动数据流探测（--probe）/ 8 ROS2 图与 /scan、TF 现状 / 9 判定与下一步
+# What it does (prints section by section, verdict at the end):
+#   0 basic info / 1 permissions & dialout / 2 USB enumeration / 3 device node & udev /
+#   4 CH340 & model clues / 5 driver packages installed? / 6 launch command reference
+#   (print only, never run) / 7 passive data-stream probe (--probe) / 8 ROS2 graph,
+#   /scan and TF status / 9 verdict and next step
 #
-# 安全性（硬约束，和任务单一致）：
-#   * 默认**只读**：不安装任何包、不改 /etc、不写文件、不重启服务。
-#   * 唯一会碰设备运行时参数的是 --probe 段里的 `stty`（设波特率）：它只改该设备
-#     当前的 termios，拔插/重启即恢复，不落盘。--request-rplidar 会向设备写 2 字节
-#     请求命令，默认关闭，必须显式打开。
-#   * 需要 root 的段**不会自己 sudo**：脚本只打印你要手动执行的命令。
+# Safety (hard constraint, same as the work order):
+#   * **read-only** by default: installs nothing, does not modify /etc, writes no
+#     files, restarts no services.
+#   * The only thing that touches device runtime parameters is `stty` (baud rate)
+#     in the --probe section: it only changes that device's current termios,
+#     which reverts on unplug/reboot and is never persisted. --request-rplidar
+#     writes a 2-byte request command to the device; it is off by default and
+#     must be enabled explicitly.
+#   * Sections that need root **never sudo themselves**: the script only prints
+#     the commands you should run by hand.
 #
-# 在哪跑：树莓派 5（aarch64，Ubuntu 24.04 + ROS2 Jazzy）。
-#         Windows 笔记本请用 check_lidar.md 的 Get-PnpDevice 段；本脚本非 Linux 直接退出。
+# Where to run: Raspberry Pi 5 (aarch64, Ubuntu 24.04 + ROS2 Jazzy).
+#         On a Windows laptop use the Get-PnpDevice section of check_lidar.md;
+#         this script exits immediately on non-Linux.
 #
-# 用法：
+# Usage:
 #   bash check_lidar.sh
 #   bash check_lidar.sh --probe
-#   bash check_lidar.sh --probe --device /dev/ttyUSB0     # 用户已确认设备时（空格形式）
-#   bash check_lidar.sh --probe --device=/dev/ttyUSB0     # 等号形式等价，两种都收
-#   sudo bash check_lidar.sh --probe                       # 未加 dialout 组时的临时办法
-#   bash check_lidar.sh --probe --request-rplidar          # 无数据时再试 RPLIDAR 请求
+#   bash check_lidar.sh --probe --device /dev/ttyUSB0     # device already confirmed (space form)
+#   bash check_lidar.sh --probe --device=/dev/ttyUSB0     # equals form is equivalent, both accepted
+#   sudo bash check_lidar.sh --probe                       # temporary workaround without dialout
+#   bash check_lidar.sh --probe --request-rplidar          # retry an RPLIDAR request when idle
 #
-# 退出码：0 = 无 FAIL；1 = 有 FAIL；2 = 环境不对 / 参数错 / --help
-# 依据：11_接口契约.md §2/§4、pi_setup/README.md 第 6 节、03_底盘物料清单.md §C、
-#       04_底盘采购记账.md。姊妹脚本：pi_setup/preflight.sh（用法一致）。
+# Exit codes: 0 = no FAIL; 1 = some FAIL; 2 = wrong environment / bad argument / --help
+# Basis: contract doc 11 (interface contract) §2/§4, pi_setup/README.md section 6, BOM doc 03 §C,
+#        purchase ledger doc 04. Sibling script: pi_setup/preflight.sh (same conventions).
 # =============================================================================
 set -uo pipefail
 
-# ---- 冻结事实（改这里等于改契约，先问 Lead）--------------------------------
+# ---- Frozen facts (changing these changes the contract, ask the Lead first) ---
 LIDAR_NODE=/dev/ttyLIDAR
 VISION_NODE=/dev/ttyVISION
 STM32_NODE=/dev/ttySTM32
 RULES_FILE=/etc/udev/rules.d/99-omninav-serial.rules
-#: 99-omninav-serial.rules 现在按 ID_PATH 区分两个同型号 CH340（1a86:7522）。
-#: 下面是真机实测的历史值；换 USB 口后会变，变了就是 WARN 不是 FAIL。
+#: 99-omninav-serial.rules now distinguishes two same-model CH340s (1a86:7522) by ID_PATH.
+#: The values below are historical measurements from the real device; they change
+#: when the USB port changes, and a change is a WARN, not a FAIL.
 EXPECTED_LIDAR_ID_PATH="platform-xhci-hcd.0-usb-0:2:1.0"
 EXPECTED_VISION_ID_PATH="platform-xhci-hcd.1-usb-0:1:1.0"
-#: 候选驱动包（实际装没装，以 /opt/ros/jazzy/share 与 overlay 为准）
+#: Candidate driver packages (whether they are really installed is decided by
+#: /opt/ros/jazzy/share and the overlay)
 DRIVER_CANDIDATES="rplidar_ros ldlidar_stl_ros2 ldlidar_ros2 ydlidar_ros2_driver ydlidar_ros2 urg_node"
-#: 被动探测的候选波特率（LD19 常见 230400；RPLIDAR A1 115200；别的雷达也有 256000）
+#: Candidate baud rates for the passive probe (LD19 usually 230400; RPLIDAR A1 115200; some lidars use 256000)
 PROBE_BAUDS="115200 230400 256000 460800"
 
 DO_PROBE=0
@@ -62,29 +71,29 @@ while [[ $# -gt 0 ]]; do
     --device=*)
       PROBE_DEV=${1#--device=}
       if [[ -z $PROBE_DEV ]]; then
-        printf '✖ --device= 后面不能为空：--device=/dev/ttyUSB0\n' >&2
+        printf '✖ --device= must not be empty: --device=/dev/ttyUSB0\n' >&2
         exit 2
       fi
       shift
       ;;
     --device)
       if [[ $# -lt 2 || -z ${2:-} || ${2:0:1} == - ]]; then
-        printf '✖ --device 需要带参数：--device /dev/ttyUSB0（也接受 --device=/dev/ttyUSB0）\n' >&2
+        printf '✖ --device requires an argument: --device /dev/ttyUSB0 (also accepts --device=/dev/ttyUSB0)\n' >&2
         exit 2
       fi
       PROBE_DEV=$2
       shift 2
       ;;
     -h | --help)
-      printf '用法：%s [--probe] [--device DEV | --device=DEV] [--request-rplidar]\n' "${0##*/}"
-      printf '  --probe            额外做被动数据流探测（每波特率 3 秒，只读）\n'
-      printf '  --device DEV       指定探测设备（空格形式；默认 /dev/ttyLIDAR；不给而节点不存在则跳过探测）\n'
-      printf '  --device=DEV       同上，等号形式，两种写法等价\n'
-      printf '  --request-rplidar  无数据时向设备写 RPLIDAR 请求 A5 20（会写设备，默认关；需同时给 --probe）\n'
+      printf 'Usage: %s [--probe] [--device DEV | --device=DEV] [--request-rplidar]\n' "${0##*/}"
+      printf '  --probe            also run a passive data-stream probe (3 s per baud rate, read-only)\n'
+      printf '  --device DEV       probe device (space form; default /dev/ttyLIDAR; skipped if the node is absent and no --device is given)\n'
+      printf '  --device=DEV       same as above, equals form; both forms are equivalent\n'
+      printf '  --request-rplidar  when idle, write RPLIDAR request A5 20 to the device (writes the device, off by default; requires --probe)\n'
       exit 2
       ;;
     *)
-      printf '✖ 不认识的选项：%s（试 --help）\n' "$1" >&2
+      printf '✖ Unknown option: %s (try --help)\n' "$1" >&2
       exit 2
       ;;
   esac
@@ -114,7 +123,7 @@ ok() {
 bad() {
   FAIL=$((FAIL + 1))
   printf '[FAIL] %s\n' "$1"
-  if [[ -n ${2:-} ]]; then printf '       → 修法：%s\n' "$2"; fi
+  if [[ -n ${2:-} ]]; then printf '       → Fix: %s\n' "$2"; fi
   return 0
 }
 warn() {
@@ -128,19 +137,19 @@ sec() { printf '\n=== %s ===\n' "$*"; }
 
 need_pi() {
   if [[ ${OMNINAV_SKIP_ARCH_CHECK:-0} == 1 ]]; then
-    printf '⚠️  OMNINAV_SKIP_ARCH_CHECK=1：已跳过 aarch64 检查（仅用于逻辑冒烟测试）。\n' >&2
+    printf '⚠️  OMNINAV_SKIP_ARCH_CHECK=1: aarch64 check skipped (logic smoke test only).\n' >&2
     return 0
   fi
   if [[ $(uname -m) != aarch64 ]]; then
-    printf '✖ check_lidar.sh 要在树莓派 5 上跑（uname -m 应为 aarch64），当前是 %s。\n' "$(uname -m)" >&2
-    printf '  Windows 笔记本请用 check_lidar.md 的 Get-PnpDevice 段（只能证明枚举，不能证明扫描）。\n' >&2
-    printf '  只验证脚本逻辑：OMNINAV_SKIP_ARCH_CHECK=1 %s\n' "$0" >&2
+    printf '✖ check_lidar.sh must run on a Raspberry Pi 5 (uname -m should be aarch64), current is %s.\n' "$(uname -m)" >&2
+    printf '  On a Windows laptop use the Get-PnpDevice section of check_lidar.md (proves enumeration only, not scanning).\n' >&2
+    printf '  To validate script logic only: OMNINAV_SKIP_ARCH_CHECK=1 %s\n' "$0" >&2
     return 2
   fi
   return 0
 }
 
-# 包是否已装：先看 /opt/ros/*，再看 $HOME/ros2_ws 的 overlay
+# Is the package installed: check /opt/ros/* first, then the $HOME/ros2_ws overlay
 pkg_present() {
   local p=$1 d
   for d in /opt/ros/*/share/"$p"; do [[ -d $d ]] && return 0; done
@@ -148,18 +157,19 @@ pkg_present() {
   return 1
 }
 
-hex_of() { # stdin -> 单行小写十六进制
+hex_of() { # stdin -> one line of lowercase hex
   od -An -v -tx1 2>/dev/null | tr -d ' \n'
 }
 
-# 被动收字节：stty 由调用方先做（好把"设不了 termios"与"0 字节"分开报），这里只读 ${2} 秒
+# Passive byte read: the caller sets stty first (so "cannot set termios" and
+# "0 bytes" are reported separately); here we only read for ${2} seconds
 probe_read() {
   local dev=$1 secs=$2
   timeout "$secs" cat "$dev" 2>/dev/null | hex_of
   return 0
 }
 
-# 打印 udev 关键字段（一个 ttyUSB 一行）
+# Print the key udev fields (one ttyUSB per line)
 tty_usb_info() {
   local t=$1
   if command -v udevadm >/dev/null 2>&1 && [[ -e /dev/$t ]]; then
@@ -167,138 +177,138 @@ tty_usb_info() {
       awk -F= '/^ID_VENDOR_ID=/{v=$2} /^ID_MODEL_ID=/{m=$2} /^ID_MODEL=/{n=$2} /^ID_PATH=/{p=$2}
                 END{printf "vendor=%s model_id=%s model=%s id_path=%s\n", v, m, n, p}'
   else
-    printf '（udevadm 不可用或 /dev/%s 不存在）\n' "$t"
+    printf '(udevadm unavailable or /dev/%s missing)\n' "$t"
   fi
 }
 
 main() {
   printf '================================================================\n'
-  printf ' OmniNav · 激光雷达只读诊断 check_lidar.sh\n'
-  printf ' 默认不安装、不改 /etc、不写文件；--probe 只用 stty 设运行时波特率\n'
+  printf ' OmniNav · lidar read-only diagnosis check_lidar.sh\n'
+  printf ' Read-only by default: no installs, no /etc changes, no files; --probe only sets runtime baud via stty\n'
   printf '================================================================\n'
 
-  # ---------------------------------------------------------- 0 基础信息
-  sec "0. 基础信息"
+  # ---------------------------------------------------------- 0 basic info
+  sec "0. Basic info"
   local m
   m=$(uname -m)
   info "uname      = $(uname -s) / $m / $(uname -r)"
-  info "主机名     = $(uname -n)"
-  info "用户       = $(id -un) (uid=$(id -u))"
-  info "系统       = $(. /etc/os-release 2>/dev/null && printf '%s %s' "$NAME" "$VERSION_ID" || printf '(读不到 os-release)')"
-  info "内存       = $(free -h 2>/dev/null | awk 'NR==2{print $2" 总 / "$7" 可用"}' || printf '(无 free)')"
-  info "python3    = $(command -v python3 >/dev/null 2>&1 && python3 --version 2>&1 || printf '(无)')"
-  info "ROS_DISTRO = ${ROS_DISTRO:-(空 —— 先 source /opt/ros/jazzy/setup.bash)}"
-  info "ROS_DOMAIN_ID = ${ROS_DOMAIN_ID:-(未设置；预期 42)}"
-  info "ros2 CLI   = $(command -v ros2 >/dev/null 2>&1 && printf '有' || printf '没有')"
-  info "lsusb      = $(command -v lsusb >/dev/null 2>&1 && printf '有' || printf '没有（不影响，脚本有 /sys 兜底）')"
-  info "timeout    = $(command -v timeout >/dev/null 2>&1 && printf '有' || printf '没有（--probe 会跳过）')"
-  info "stty       = $(command -v stty >/dev/null 2>&1 && printf '有' || printf '没有')"
+  info "hostname   = $(uname -n)"
+  info "user       = $(id -un) (uid=$(id -u))"
+  info "os         = $(. /etc/os-release 2>/dev/null && printf '%s %s' "$NAME" "$VERSION_ID" || printf '(cannot read os-release)')"
+  info "memory     = $(free -h 2>/dev/null | awk 'NR==2{print $2" total / "$7" available"}' || printf '(no free)')"
+  info "python3    = $(command -v python3 >/dev/null 2>&1 && python3 --version 2>&1 || printf '(none)')"
+  info "ROS_DISTRO = ${ROS_DISTRO:-(empty -- source /opt/ros/jazzy/setup.bash first)}"
+  info "ROS_DOMAIN_ID = ${ROS_DOMAIN_ID:-(not set; expected 42)}"
+  info "ros2 CLI   = $(command -v ros2 >/dev/null 2>&1 && printf 'yes' || printf 'no')"
+  info "lsusb      = $(command -v lsusb >/dev/null 2>&1 && printf 'yes' || printf 'no (does not matter, /sys fallback is used)')"
+  info "timeout    = $(command -v timeout >/dev/null 2>&1 && printf 'yes' || printf 'no (--probe will be skipped)')"
+  info "stty       = $(command -v stty >/dev/null 2>&1 && printf 'yes' || printf 'no')"
 
-  # ---------------------------------------------------------- 1 权限 / dialout
-  sec "1. 权限与 dialout（★ 第一步，先看这里）"
+  # ---------------------------------------------------------- 1 permissions / dialout
+  sec "1. Permissions and dialout (★ first step, read this first)"
   local target_user=${SUDO_USER:-$(id -un)} cur_groups dialout_members
   cur_groups=$(id -nG "$target_user" 2>/dev/null || id -nG)
-  info "目标用户   = $target_user（雷达驱动最终以这个用户跑）"
-  info "当前组     = $cur_groups"
+  info "target user = $target_user (the lidar driver ends up running as this user)"
+  info "current groups = $cur_groups"
   dialout_members=$(getent group dialout 2>/dev/null | awk -F: '{print $4}' || true)
-  info "dialout 组 = ${dialout_members:-(读不到 /etc/group)}"
+  info "dialout group = ${dialout_members:-(cannot read /etc/group)}"
   if printf '%s\n' "$cur_groups" | tr ' ' '\n' | grep -qx dialout; then
-    ok "$target_user 在 dialout 组里" "读 /dev/ttyLIDAR 不需要 sudo。"
+    ok "$target_user is in the dialout group" "Reading /dev/ttyLIDAR needs no sudo."
   else
-    bad "$target_user 不在 dialout 组 ⇒ 读 /dev/ttyLIDAR、/dev/ttySTM32 会 Permission denied" \
-      "sudo usermod -aG dialout $target_user ；然后**注销重新登录**（或 SSH 重连）。usermod 不会更新已登录会话的组；临时验证可用 newgrp dialout"
+    bad "$target_user is not in the dialout group => reading /dev/ttyLIDAR and /dev/ttySTM32 will fail with Permission denied" \
+      "sudo usermod -aG dialout $target_user ; then **log out and back in** (or reconnect SSH). usermod does not update groups of an already logged-in session; newgrp dialout works for a temporary check"
   fi
-  # 当前进程实际生效的组跟 "登录时的组" 可能不同，两个都看
-  info "当前进程生效组 = $(id -nG)（本行是脚本进程的真实权限；与目标用户组不同说明还没重登）"
+  # Effective groups of this process may differ from the login-time groups -- check both
+  info "effective groups of this process = $(id -nG) (this line shows the script process's real privileges; a mismatch with the target user's groups means you have not logged in again)"
 
-  # ---------------------------------------------------------- 2 USB 枚举
-  sec "2. USB 枚举（雷达到底插上了没有）"
+  # ---------------------------------------------------------- 2 USB enumeration
+  sec "2. USB enumeration (is the lidar even plugged in)"
   if command -v lsusb >/dev/null 2>&1; then
     local usb_dump
     usb_dump=$(lsusb 2>/dev/null || true)
     N7522=$(printf '%s\n' "$usb_dump" | grep -c '1a86:7522' || true)
     N7523=$(printf '%s\n' "$usb_dump" | grep -c '1a86:7523' || true)
     NCP210=$(printf '%s\n' "$usb_dump" | grep -ciE '10c4:ea60|10c4:ea70' || true)
-    info "CH340 1a86:7522 = ${N7522} 个（雷达/视觉记录值）"
-    info "CH340 1a86:7523 = ${N7523} 个（STM32 的 USB-TTL）"
-    info "CP210x 10c4:ea6x = ${NCP210} 个（RPLIDAR 原厂转接板常见芯片）"
-    info "所有串口类 USB 设备："
-    printf '%s\n' "$usb_dump" | grep -iE '1a86|10c4|0403|serial|uart' | sed 's/^/       /' || info "       （没有匹配 1a86 / 10c4 / 0403 的设备）"
+    info "CH340 1a86:7522 = ${N7522} (recorded value for lidar/vision)"
+    info "CH340 1a86:7523 = ${N7523} (the STM32's USB-TTL)"
+    info "CP210x 10c4:ea6x = ${NCP210} (common chip on RPLIDAR vendor adapter boards)"
+    info "all serial-class USB devices:"
+    printf '%s\n' "$usb_dump" | grep -iE '1a86|10c4|0403|serial|uart' | sed 's/^/       /' || info "       (no device matching 1a86 / 10c4 / 0403)"
   else
-    warn "lsusb 不可用，改用 /sys 判断（可能不准）" "sudo apt install usbutils（无外网则忽略，本脚本仍可继续）"
+    warn "lsusb unavailable, falling back to /sys (may be inaccurate)" "sudo apt install usbutils (ignore if offline; this script can continue)"
     N7522=$(ls -d /dev/ttyUSB* 2>/dev/null | wc -l)
     N7523=0
     NCP210=0
-    info "兜底：/dev/ttyUSB* 数量 = ${N7522}（无法区分 7522/7523/CP210x）"
+    info "fallback: /dev/ttyUSB* count = ${N7522} (cannot distinguish 7522/7523/CP210x)"
   fi
 
   local ttys=() t
   for t in /dev/ttyUSB* /dev/ttyACM*; do [[ -e $t ]] && ttys+=("$t"); done
   NTOTAL=${#ttys[@]}
-  info "串口设备节点数 = ${NTOTAL}（含 ttyACM）"
+  info "serial device node count = ${NTOTAL} (including ttyACM)"
   if [[ $NTOTAL -gt 0 ]]; then
     for t in "${ttys[@]}"; do
       info "$t  $(tty_usb_info "${t##*/}")"
     done
   fi
-  info "by-path 链接："
+  info "by-path links:"
   local bp
   for bp in /dev/serial/by-path/*; do
     [[ -e $bp ]] && info "  ${bp##*/} -> $(readlink -f "$bp")"
   done
-  info "by-id 链接（★ 同型号 CH340 没唯一序列号，会撞名，禁止代码依赖）："
+  info "by-id links (★ same-model CH340s have no unique serial number and collide; code must never rely on them):"
   for bp in /dev/serial/by-id/*; do
     [[ -e $bp ]] && info "  ${bp##*/} -> $(readlink -f "$bp")"
   done
   local klog
   klog=$( { dmesg 2>/dev/null || journalctl -k --no-pager 2>/dev/null; } | grep -iE 'ch34|cp210|ftdi|ttyUSB|usb-serial' | tail -n 12 || true)
   if [[ -n $klog ]]; then
-    info "最近内核日志（ch34/cp210/ttyUSB）："
+    info "recent kernel log (ch34/cp210/ttyUSB):"
     printf '%s\n' "$klog" | sed 's/^/       /'
   else
-    info "看不到内核日志（dmesg 需要 root 或被禁用）—— 不影响判定"
+    info "cannot see the kernel log (dmesg needs root or is disabled) -- does not affect the verdict"
   fi
   if [[ ${N7522:-0} -eq 0 && ${NCP210:-0} -eq 0 && $NTOTAL -eq 0 ]]; then
-    bad "USB 上没有任何串口设备（既没有 1a86:7522，也没有 CP210x，/dev/ttyUSB* 为空）" \
-      "① 拔插雷达并换一根**能传数据**的 USB 线；② 换树莓派 USB 口；③ 检查雷达转接板供电（Pi 5 非 PD 供电时 USB 总限流约 600 mA）；④ 插到笔记本上用 check_lidar.md 的 Windows 段看是否枚举"
+    bad "no serial device on USB (neither 1a86:7522 nor CP210x, and /dev/ttyUSB* is empty)" \
+      "1) replug the lidar with a **data-capable** USB cable; 2) try another Pi USB port; 3) check adapter board power (a Pi 5 on non-PD power limits total USB current to about 600 mA); 4) plug into the laptop and use the Windows section of check_lidar.md to see whether it enumerates"
   fi
 
-  # ---------------------------------------------------------- 3 设备节点 / udev
-  sec "3. 设备节点与 udev 规则（/dev/ttyLIDAR 在不在）"
+  # ---------------------------------------------------------- 3 device node / udev
+  sec "3. Device nodes and udev rules (is /dev/ttyLIDAR present)"
   local n
   for n in "$LIDAR_NODE" "$VISION_NODE" "$STM32_NODE"; do
     if [[ -e $n ]]; then
-      info "$n 存在 → $(readlink -f "$n")，权限 $(stat -c '%A %U:%G' "$n" 2>/dev/null || printf '(stat 失败)')"
+      info "$n exists -> $(readlink -f "$n"), mode $(stat -c '%A %U:%G' "$n" 2>/dev/null || printf '(stat failed)')"
       if [[ -r $n ]]; then
-        ok "$n 当前用户可读"
+        ok "$n is readable by the current user"
       else
-        bad "$n 存在但当前用户不可读" "先加 dialout 组（见第 1 段）；临时排障才用 sudo，不要把 0666 写进规则"
+        bad "$n exists but is not readable by the current user" "add the dialout group first (section 1); sudo is for temporary troubleshooting only -- never put 0666 into the rules"
       fi
       if [[ ! -w $n ]]; then
-        warn "$n 当前用户不可写（驱动多以 O_RDWR 打开，可能失败）" "正常权限是 root:dialout 0660；先确认第 1 段 dialout 是否生效"
+        warn "$n is not writable by the current user (drivers usually open with O_RDWR and may fail)" "normal mode is root:dialout 0660; first confirm section 1's dialout membership is effective"
       fi
       if [[ $n == "$LIDAR_NODE" ]]; then LIDAR_NODE_OK=1; fi
     else
-      bad "$n 不存在" "见本段下面的 udev 检查结论；设备名是契约冻结的，不要用 /dev/ttyUSB* 替代"
+      bad "$n does not exist" "see the udev check below in this section; device names are frozen by contract -- do not substitute /dev/ttyUSB*"
     fi
   done
   if [[ -f $RULES_FILE ]]; then
-    ok "udev 规则文件已安装：$RULES_FILE" "$(wc -l <"$RULES_FILE" 2>/dev/null || true) 行"
+    ok "udev rules file installed: $RULES_FILE" "$(wc -l <"$RULES_FILE" 2>/dev/null || true) lines"
     if grep -q 'ttyLIDAR' "$RULES_FILE"; then
-      info "规则里有 ttyLIDAR 条目：$(grep -n 'ttyLIDAR' "$RULES_FILE" | head -n 3 | tr '\n' ' ')"
+      info "rules contain a ttyLIDAR entry: $(grep -n 'ttyLIDAR' "$RULES_FILE" | head -n 3 | tr '\n' ' ')"
     else
-      bad "规则文件里没有 ttyLIDAR 条目" "对比 pi_setup/99-omninav-serial.rules；不要手改 /etc 后再不同步仓库"
+      bad "rules file has no ttyLIDAR entry" "compare with pi_setup/99-omninav-serial.rules; do not hand-edit /etc without syncing the repo"
     fi
     if grep -q "$EXPECTED_LIDAR_ID_PATH" "$RULES_FILE"; then
-      info "规则里的雷达 ID_PATH 仍是你上次实测的 $EXPECTED_LIDAR_ID_PATH"
+      info "the lidar ID_PATH in the rules is still the last measured $EXPECTED_LIDAR_ID_PATH"
     else
-      warn "规则里的雷达 ID_PATH 与本脚本记录的历史值不一致（换过 USB 口？）" "以规则文件为准；让 pi_setup 按新 ID_PATH 重生成，不要在本脚本里改"
+      warn "the lidar ID_PATH in the rules differs from the historical value recorded here (changed USB port?)" "the rules file is authoritative; regenerate it under pi_setup for the new ID_PATH, do not change it inside this script"
     fi
   else
-    bad "udev 规则文件未安装：$RULES_FILE 不存在 ⇒ /dev/ttyLIDAR 不可能自动出现" \
-      "sudo cp pi_setup/99-omninav-serial.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=tty ；装完重新拔插雷达。★ 这一步会改系统，属用户现场操作，本脚本不执行"
+    bad "udev rules file not installed: $RULES_FILE does not exist => /dev/ttyLIDAR can never appear automatically" \
+      "sudo cp pi_setup/99-omninav-serial.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=tty ; replug the lidar afterwards. ★ This modifies the system and is a user-side action; this script never executes it"
   fi
-  # 已枚举到 7522 但节点不存在时，给出“规则没生效 / ID_PATH 变了”的区分
+  # 7522 enumerated but node missing: distinguish "rules not effective" from "ID_PATH changed"
   if [[ $LIDAR_NODE_OK -eq 0 && ${N7522:-0} -gt 0 ]]; then
     local match=0 tj
     for t in "${ttys[@]}"; do
@@ -307,16 +317,16 @@ main() {
       if printf '%s' "$tj" | grep -q "$EXPECTED_LIDAR_ID_PATH"; then match=1; fi
     done
     if [[ $match -eq 1 ]]; then
-      bad "有一个 7522 设备的 ID_PATH 恰好等于规则里的雷达路径，但 /dev/ttyLIDAR 仍不存在 ⇒ 规则没生效" \
-        "重新装规则并 reload+trigger（见上），然后拔插雷达；再不行 `udevadm test --action=add /sys/class/tty/ttyUSB0`"
+      bad "a 7522 device's ID_PATH exactly matches the lidar path in the rules, yet /dev/ttyLIDAR still does not exist => rules not effective" \
+        "reinstall the rules and reload+trigger (see above), then replug the lidar; if that fails try \`udevadm test --action=add /sys/class/tty/ttyUSB0\`"
     else
-      warn "枚举到 7522 设备，但它们都不在规则里记录的雷达 ID_PATH 上 ⇒ 插口变了，规则匹配不到" \
-        "用 pi_setup/identify_ports.sh 重新取当前 ID_PATH，把结果报给 Lead 由 pi_setup 更新规则；不要在本轮临时改契约设备名"
+      warn "7522 devices enumerated, but none is on the lidar ID_PATH recorded in the rules => port changed, rules cannot match" \
+        "re-read the current ID_PATH with pi_setup/identify_ports.sh and report it to the Lead so pi_setup updates the rules; do not temporarily change the contract device name in this round"
     fi
   fi
 
-  # ---------------------------------------------------------- 4 型号线索
-  sec "4. CH340 与型号线索（能推断到哪一步）"
+  # ---------------------------------------------------------- 4 model clues
+  sec "4. CH340 and model clues (how far we can infer)"
   if [[ $NTOTAL -gt 0 ]]; then
     for t in "${ttys[@]}"; do
       [[ $t == *ttyUSB* ]] || continue
@@ -325,124 +335,125 @@ main() {
       vid=$(printf '%s' "$info_line" | sed -n 's/.*vendor=\([^ ]*\).*/\1/p')
       pid=$(printf '%s' "$info_line" | sed -n 's/.*model_id=\([^ ]*\).*/\1/p')
       product=$(printf '%s' "$info_line" | sed -n 's/.*model=\(.*\) id_path=.*/\1/p')
-      info "$t  vendor=$vid pid=$pid product=${product:-（空）}"
+      info "$t  vendor=$vid pid=$pid product=${product:-(empty)}"
       if [[ $pid == 7522 ]]; then
-        info "  → 7522 = CH340 系列（雷达与视觉同型，USB 描述符里没有可区分的型号）"
+        info "  -> 7522 = CH340 family (lidar and vision are the same model; USB descriptors carry no distinguishing model)"
       elif [[ $pid == 7523 ]]; then
-        info "  → 7523 = CH340 经典 USB-TTL（记录值是 STM32 链路，不是雷达）"
+        info "  -> 7523 = classic CH340 USB-TTL (recorded value: STM32 link, not the lidar)"
       elif [[ $pid == ea60 || $pid == ea70 ]]; then
-        info "  → CP210x（RPLIDAR 原厂转接板常见芯片）⇒ 强线索偏 RPLIDAR A1，但以铭牌为准"
+        info "  -> CP210x (common chip on RPLIDAR vendor adapter boards) => strong hint towards RPLIDAR A1, but the nameplate wins"
       fi
     done
   fi
   if [[ ${N7522:-0} -gt 1 ]]; then
-    info "有 ${N7522} 个 7522 设备（雷达 + 视觉）：无法从 USB 描述符区分，只能靠物理插口 ID_PATH；**不要猜 ttyUSB0/1**"
+    info "there are ${N7522} 7522 devices (lidar + vision): USB descriptors cannot tell them apart, only the physical port ID_PATH can; **do not guess ttyUSB0/1**"
   fi
-  info "型号判定优先级：铭牌/丝印照片 > 转接板芯片（CP2102⇒RPLIDAR 线索）> 数据流特征（54 2c⇒LD19 线索）"
-  info "★ 本轮不猜型号；拿不到铭牌就按 check_lidar.md 的拍照清单让用户拍回来"
+  info "model priority: nameplate/silkscreen photo > adapter chip (CP2102 => RPLIDAR hint) > data-stream signature (54 2c => LD19 hint)"
+  info "★ do not guess the model this round; without a nameplate use the photo checklist in check_lidar.md and ask the user for photos"
 
-  # ---------------------------------------------------------- 5 驱动包
-  sec "5. 驱动包是否已装（Pi 无外网 ⇒ 只能靠已装包）"
+  # ---------------------------------------------------------- 5 driver packages
+  sec "5. Are driver packages installed (Pi has no internet => only preinstalled packages count)"
   local pkg
   for pkg in $DRIVER_CANDIDATES; do
     if pkg_present "$pkg"; then
       DRIVER_FOUND+=" $pkg"
       DRIVER_LIST+="$pkg "
-      ok "驱动包已装：$pkg"
+      ok "driver package installed: $pkg"
     fi
   done
   if command -v ros2 >/dev/null 2>&1; then
     local ros_pkgs
     ros_pkgs=$(timeout 30 ros2 pkg list 2>/dev/null | grep -iE 'rplidar|ldlidar|ydlidar|urg_node|lidar_driver|lslidar|hokuyo' | head -n 20 || true)
     if [[ -n $ros_pkgs ]]; then
-      info "ros2 pkg list 里与雷达相关的包："
+      info "lidar-related packages in ros2 pkg list:"
       printf '%s\n' "$ros_pkgs" | sed 's/^/       /'
       while IFS= read -r pkg; do
         [[ -n $pkg ]] || continue
         case " $DRIVER_LIST " in *" $pkg "*) ;; *) DRIVER_LIST+="$pkg " ;; esac
       done <<<"$ros_pkgs"
       if [[ -z $DRIVER_FOUND ]]; then
-        DRIVER_FOUND="(候选清单外) $DRIVER_LIST"
+        DRIVER_FOUND="(outside candidate list) $DRIVER_LIST"
       fi
     else
-      info "ros2 pkg list 里没有 rplidar/ldlidar/ydlidar/urg 相关包"
+      info "ros2 pkg list has no rplidar/ldlidar/ydlidar/urg related package"
     fi
   else
-    warn "ros2 CLI 不可用，驱动检查只看了 /opt/ros/*/share 目录" "source /opt/ros/jazzy/setup.bash 后重跑（不解决无外网问题）"
+    warn "ros2 CLI unavailable, driver check only looked at /opt/ros/*/share" "source /opt/ros/jazzy/setup.bash and rerun (does not fix the offline problem)"
   fi
   if [[ -z $DRIVER_FOUND ]]; then
-    bad "没有装任何雷达驱动包（候选：$DRIVER_CANDIDATES）" \
-      "Pi 无外网 ⇒ 装不了。三条离线路线见 pi_setup/README.md 第 6 节：① 连手机热点借网；② 有网机器 git clone 源码 scp 后 colcon build --packages-select <包>；③ 另台 Ubuntu apt-get download 后 scp+dpkg -i。★ 先拍照确认型号再决定装哪个，不要两个都装"
+    bad "no lidar driver package installed (candidates: $DRIVER_CANDIDATES)" \
+      "The Pi has no internet => cannot install. Three offline routes in pi_setup/README.md section 6: 1) tether to a phone hotspot; 2) git clone the source on a networked machine, scp it over and colcon build --packages-select <pkg>; 3) on another Ubuntu box apt-get download then scp + dpkg -i. ★ Photograph the model first, then decide which one to install -- do not install both"
   fi
 
-  # ---------------------------------------------------------- 6 启动命令参考
-  sec "6. 启动命令参考（只打印，不执行）"
-  info "通用四查：① 串口必须改成 $LIDAR_NODE（驱动默认写 ttyUSB0，契约 §2 禁止）；② 波特率来自型号/说明书；③ 部分包要 product_name/model 参数；④ /scan 的 frame_id 必须是 laser"
-  info "先查真实参数名（不要猜）：ros2 launch <包名> <launch文件> --show-args  或  ls \$(ros2 pkg prefix <包名>)/share/<包名>/"
+  # ---------------------------------------------------------- 6 launch command reference
+  sec "6. Launch command reference (print only, never executed)"
+  info "four general checks: 1) the serial port must be $LIDAR_NODE (drivers default to ttyUSB0, contract §2 forbids that); 2) the baud rate comes from the model/datasheet; 3) some packages need product_name/model arguments; 4) the /scan frame_id must be laser"
+  info "look up the real parameter names first (do not guess): ros2 launch <pkg> <launchfile> --show-args  or  ls \$(ros2 pkg prefix <pkg>)/share/<pkg>/"
   if printf '%s' "$DRIVER_LIST" | grep -q 'rplidar_ros'; then
-    info "→ rplidar_ros 分支：ros2 launch rplidar_ros rplidar_a1_launch.py（实际 launch 文件名以 \$(ros2 pkg prefix rplidar_ros)/share/rplidar_ros/launch 为准）"
-    info "  把串口参数改为 $LIDAR_NODE；波特率 RPLIDAR A1 常见 115200；启动后 ros2 topic hz /scan"
+    info "-> rplidar_ros branch: ros2 launch rplidar_ros rplidar_a1_launch.py (the actual launch filename is whatever is under \$(ros2 pkg prefix rplidar_ros)/share/rplidar_ros/launch)"
+    info "  change the serial argument to $LIDAR_NODE; RPLIDAR A1 commonly uses 115200; after launch run ros2 topic hz /scan"
   fi
   if printf '%s' "$DRIVER_LIST" | grep -qE 'ldlidar'; then
-    info "→ ldlidar 分支：ldlidar_stl_ros2 / ldlidar_ros2 的 launch 与 yaml 因版本而异，先 ls share/launch 与 share/config"
-    info "  LD19 常见波特率 230400（不是 115200）；把端口改 $LIDAR_NODE；启动后 ros2 topic hz /scan（LD19 10 Hz）"
+    info "-> ldlidar branch: launch files and yaml differ between ldlidar_stl_ros2 / ldlidar_ros2 versions; first ls share/launch and share/config"
+    info "  LD19 commonly uses 230400 (not 115200); change the port to $LIDAR_NODE; after launch run ros2 topic hz /scan (LD19 10 Hz)"
   fi
   if printf '%s' "$DRIVER_LIST" | grep -qE 'ydlidar'; then
-    info "→ ydlidar 分支：先确认型号参数与波特率，再把端口改为 $LIDAR_NODE"
+    info "-> ydlidar branch: confirm the model parameter and baud rate first, then change the port to $LIDAR_NODE"
   fi
   if [[ -z $DRIVER_FOUND ]]; then
-    info "（没有任何驱动包 ⇒ 第 6 段无启动命令可给，先解决第 5 段的阻塞）"
-  elif [[ $DRIVER_FOUND == "(候选清单外)"* ]]; then
-    info "候选清单外的雷达相关包：$DRIVER_LIST → 人工确认它是否就是本雷达的驱动，再决定是否用"
+    info "(no driver package at all => section 6 cannot give launch commands; resolve the section 5 blocker first)"
+  elif [[ $DRIVER_FOUND == "(outside candidate list)"* ]]; then
+    info "lidar-related packages outside the candidate list: $DRIVER_LIST -> manually confirm whether one of them is this lidar's driver before using it"
   fi
-  info "★ 驱动 launch 起来后不要同时再跑 check_lidar.sh 的探测段（同一串口只能一个进程读）"
+  info "★ do not run the probe section of check_lidar.sh while a driver launch is running (only one process may read a serial port)"
 
-  # ---------------------------------------------------------- 7 数据流探测
-  sec "7. 被动数据流探测（--probe 才执行；只读，仅设运行时波特率）"
+  # ---------------------------------------------------------- 7 data-stream probe
+  sec "7. Passive data-stream probe (only with --probe; read-only, runtime baud only)"
   if [[ $DO_REQUEST -eq 1 && $DO_PROBE -eq 0 ]]; then
-    info "--request-rplidar 只在 --probe 收到 0 字节后才写设备；本次没给 --probe，跳过请求段（避免无意义写设备）。"
+    info "--request-rplidar writes the device only after --probe received 0 bytes; --probe was not given, so the request section is skipped (avoids a pointless device write)."
   fi
   if [[ $DO_PROBE -eq 0 ]]; then
-    info "未启用。要判断“有没有字节出来”，加 --probe 重跑（约 12 秒）。"
-    info "若不想跑脚本：sudo stty -F $LIDAR_NODE 230400 raw -echo && sudo timeout 3 cat $LIDAR_NODE | od -An -tx1 | head"
+    info "not enabled. To find out whether any bytes come out, rerun with --probe (about 12 s)."
+    info "If you would rather not run the script: sudo stty -F $LIDAR_NODE 230400 raw -echo && sudo timeout 3 cat $LIDAR_NODE | od -An -tx1 | head"
   else
     if [[ -z $PROBE_DEV ]]; then
       if [[ $LIDAR_NODE_OK -eq 1 ]]; then
         PROBE_DEV=$LIDAR_NODE
       else
-        warn "没有可探测的设备：$LIDAR_NODE 不存在且未给 --device" "先解决第 3 段；用户确认某个 /dev/ttyUSBn 是雷达时再跑 --probe --device /dev/ttyUSBn"
+        warn "no probeable device: $LIDAR_NODE does not exist and --device was not given" "fix section 3 first; once the user confirms which /dev/ttyUSBn is the lidar, run --probe --device /dev/ttyUSBn"
       fi
     fi
     if [[ -n $PROBE_DEV ]]; then
       if [[ ! -e $PROBE_DEV ]]; then
-        bad "探测设备不存在：$PROBE_DEV"
+        bad "probe device does not exist: $PROBE_DEV"
       elif [[ ! -r $PROBE_DEV || ! -w $PROBE_DEV ]]; then
-        bad "当前用户对 $PROBE_DEV 无读写权限（stty 需要）" \
-          "手动执行：sudo bash $0 --probe  （临时）；长期修法是加 dialout 组，见第 1 段"
+        bad "current user has no read/write permission on $PROBE_DEV (stty needs it)" \
+          "run manually: sudo bash $0 --probe  (temporary); the long-term fix is the dialout group, see section 1"
       elif ! command -v timeout >/dev/null 2>&1; then
-        warn "系统没有 timeout 命令，跳过探测（不装包）" "sudo apt install coreutils 需外网；也可以手动用 stty+cat 探测"
+        warn "no timeout command on the system, skipping probe (no package installation)" "sudo apt install coreutils needs internet; you can also probe manually with stty+cat"
       else
         PROBE_RUN=1
-        info "探测设备 = $PROBE_DEV；候选波特率 = $PROBE_BAUDS；每档收 3 秒"
+        info "Probe device = $PROBE_DEV; candidate baud rates = $PROBE_BAUDS; 3 s per rate"
         local baud out bytes first hint stty_ok=1
-        # stty 预检：设不了 termios ⇒ 设备打不开 / 不是 tty / 无权限，与"0 字节"是两回事，分开报
+        # stty pre-check: cannot set termios => device cannot be opened / is not a tty / no permission;
+        # that is not the "0 bytes" case, so report it separately
         if ! stty -F "$PROBE_DEV" 115200 cs8 -parenb -cstopb raw -echo -iexten -crtscts 2>/dev/null; then
           PROBE_STTY_FAIL=1
           stty_ok=0
-          warn "stty 设 $PROBE_DEV 失败（设备打不开 / 不是 tty / 无权限）——这不是「0 字节」问题，本轮探测未执行" \
-            "手动确认：ls -l $PROBE_DEV；stty -F $PROBE_DEV 115200 raw -echo；无权限见第 1 段"
+          warn "stty failed on $PROBE_DEV (cannot open / not a tty / no permission) -- this is not the \"0 bytes\" case, probe not executed this round" \
+            "confirm manually: ls -l $PROBE_DEV; stty -F $PROBE_DEV 115200 raw -echo; for permissions see section 1"
         fi
         if [[ $stty_ok -eq 1 ]]; then
           for baud in $PROBE_BAUDS; do
             if ! stty -F "$PROBE_DEV" "$baud" cs8 -parenb -cstopb raw -echo -iexten -crtscts 2>/dev/null; then
-              PROBE_ENTRIES+=("$baud  stty 设置失败（该档未探测）")
-              info "$baud  → stty 设置失败（该波特率不被设备/驱动接受；≠ 0 字节）"
+              PROBE_ENTRIES+=("$baud  stty setup failed (this rate not probed)")
+              info "$baud  -> stty setup failed (baud not accepted by device/driver; != 0 bytes)"
               continue
             fi
             out=$(probe_read "$PROBE_DEV" 3) || true
             if [[ -z $out ]]; then
               PROBE_ENTRIES+=("$baud  0 B")
-              info "$baud  → 0 字节"
+              info "$baud  -> 0 bytes"
               continue
             fi
             bytes=$(( ${#out} / 2 ))
@@ -450,30 +461,30 @@ main() {
             first=${out:0:64}
             hint=""
             if [[ $out == *542c* ]]; then
-              hint="含 54 2c（LD19 包头特征）"
+              hint="contains 54 2c (LD19 header signature)"
             elif [[ $out == *a55a* ]]; then
-              hint="含 A5 5A（RPLIDAR 特征，偏 A1 方向）"
+              hint="contains A5 5A (RPLIDAR signature, points towards A1)"
             fi
-            PROBE_ENTRIES+=("$baud  ${bytes} B  ${hint:-无已知包头特征}")
-            info "$baud  → ${bytes} 字节${hint:+，}$hint；前 32 字节：$first"
+            PROBE_ENTRIES+=("$baud  ${bytes} B  ${hint:-no known header signature}")
+            info "$baud  -> ${bytes} bytes${hint:+, }$hint; first 32 bytes: $first"
           done
         fi
         if [[ ${#PROBE_ENTRIES[@]} -gt 0 ]]; then
-          info "逐档结果："
+          info "per-rate results:"
           for out in "${PROBE_ENTRIES[@]}"; do info "  $out"; done
         fi
         if [[ $PROBE_BYTES -gt 0 ]]; then
-          ok "被动收到 $PROBE_BYTES 字节 ⇒ 设备在主动吐数据（不是哑设备）"
-          info "★ 有字节 ≠ 能出 /scan：还要驱动包 + 正确参数（第 5、6 段）。数据流特征只做方向性线索，型号以铭牌为准"
+          ok "passively received $PROBE_BYTES bytes => the device is actively streaming data (not a dead device)"
+          info "★ bytes present != /scan ready: you still need a driver package and correct parameters (sections 5, 6). Stream signatures are directional hints only -- the nameplate wins"
         elif [[ $stty_ok -eq 0 ]]; then
-          warn "探测未执行（stty 设不了设备，≠ 0 字节）" \
-            "先解决设备打不开 / 不是 tty / 权限问题，再重跑 --probe；不要把这条当成「雷达没数据」"
+          warn "probe not executed (stty cannot configure the device, != 0 bytes)" \
+            "fix the cannot-open / not-a-tty / permission issue first, then rerun --probe; do not treat this as \"the lidar has no data\""
         else
-          warn "所有候选波特率下 3 秒内都是 0 字节" \
-            "可能：① 波特率不对（试更多档位）；② 雷达没供电/线序错；③ 该型号要先收请求（RPLIDAR 类）。先拔插、看转接板指示灯，再用 --request-rplidar 重试（会向设备写 A5 20，默认关闭）"
+          warn "All candidate baud rates produced 0 bytes within 3 s" \
+            "possible causes: 1) wrong baud rate (try more rates); 2) lidar unpowered / wrong wire order; 3) this model needs a request first (RPLIDAR family). Replug, check the adapter board LED, then retry with --request-rplidar (it writes A5 20 to the device, off by default)"
         fi
         if [[ $DO_REQUEST -eq 1 && $PROBE_BYTES -eq 0 && $stty_ok -eq 1 ]]; then
-          info "尝试 RPLIDAR 请求：向 $PROBE_DEV 写 A5 20（写设备；仍不落盘）"
+          info "trying RPLIDAR request: writing A5 20 to $PROBE_DEV (writes the device; still nothing on disk)"
           if printf '\245\040' >"$PROBE_DEV" 2>/dev/null; then
             local req_stty=1
             if stty -F "$PROBE_DEV" 115200 cs8 -parenb -cstopb raw -echo -iexten -crtscts 2>/dev/null; then
@@ -481,101 +492,101 @@ main() {
             else
               req_stty=0
               out=""
-              info "请求后 stty 115200 设置失败：无法读取（与「0 字节」区分，这是设备设置失败）"
+              info "stty 115200 failed after the request: cannot read (distinct from \"0 bytes\" -- this is a device setup failure)"
             fi
             if [[ -n $out ]]; then
               bytes=$(( ${#out} / 2 ))
               PROBE_BYTES=$((PROBE_BYTES + bytes))
-              PROBE_ENTRIES+=("115200(请求后)  ${bytes} B")
-              info "请求后收到 ${bytes} 字节；前 32 字节：${out:0:64}"
-              ok "请求后有响应 ⇒ 更像 RPLIDAR 请求-应答协议（仍以铭牌为准）"
+              PROBE_ENTRIES+=("115200(after request)  ${bytes} B")
+              info "after the request received ${bytes} bytes; first 32 bytes: ${out:0:64}"
+              ok "response after the request => more like the RPLIDAR request/response protocol (the nameplate still wins)"
             elif [[ $req_stty -eq 0 ]]; then
-              warn "请求后无法读取（stty 设置失败）——不是「0 字节」，先查设备/权限" \
-                "手动确认：ls -l $PROBE_DEV；stty -F $PROBE_DEV 115200 raw -echo"
+              warn "cannot read after the request (stty setup failed) -- not \"0 bytes\"; check device/permissions first" \
+                "confirm manually: ls -l $PROBE_DEV; stty -F $PROBE_DEV 115200 raw -echo"
             else
-              warn "请求后仍无字节" "查 TX/RX 交叉、供电、波特率；也拍转接板芯片照片回来"
+              warn "still no bytes after the request" "check TX/RX crossover, power and baud rate; also photograph the adapter board chip"
             fi
           else
-            warn "写设备失败（权限？）" "用 sudo bash $0 --probe --request-rplidar --device $PROBE_DEV"
+            warn "writing the device failed (permissions?)" "use sudo bash $0 --probe --request-rplidar --device $PROBE_DEV"
           fi
         elif [[ $DO_REQUEST -eq 1 && $stty_ok -eq 0 ]]; then
-          info "stty 设不了 $PROBE_DEV，跳过 --request-rplidar 请求段（写设备无意义）"
+          info "stty cannot configure $PROBE_DEV, skipping the --request-rplidar write (writing the device would be meaningless)"
         fi
       fi
     fi
   fi
 
-  # ---------------------------------------------------------- 8 ROS2 现状
-  sec "8. ROS2 图与 /scan、TF 现状（读当前系统状态，不启动任何节点）"
+  # ---------------------------------------------------------- 8 ROS2 status
+  sec "8. ROS2 graph, /scan and TF status (reads current state, starts no node)"
   if ! command -v ros2 >/dev/null 2>&1; then
-    warn "ros2 CLI 不可用，跳过" "source /opt/ros/jazzy/setup.bash 后重跑"
+    warn "ros2 CLI unavailable, skipping" "source /opt/ros/jazzy/setup.bash and rerun"
   else
     local topics
     topics=$(timeout 20 ros2 topic list 2>/dev/null || true)
     if [[ -z $topics ]]; then
-      warn "ros2 topic list 无输出（ROS2 守护进程起不来或没 source 环境）" "先 source /opt/ros/jazzy/setup.bash；2GB 内存下避免同时开很多节点"
+      warn "ros2 topic list gave no output (ROS2 daemon cannot start, or environment not sourced)" "source /opt/ros/jazzy/setup.bash first; on 2GB RAM avoid running many nodes at once"
     else
       for n in /scan /tf /odom /cmd_vel /tf_static; do
-        if printf '%s\n' "$topics" | grep -qx "$n"; then info "话题存在：$n"; else info "话题不存在（可能没节点在跑，属正常）：$n"; fi
+        if printf '%s\n' "$topics" | grep -qx "$n"; then info "topic exists: $n"; else info "topic absent (normal if no node is running): $n"; fi
       done
       if printf '%s\n' "$topics" | grep -qx /scan; then
-        ok "/scan 话题已存在（有节点声明了它）" "手动确认数据流：timeout 20 ros2 topic hz /scan；确认 frame_id：ros2 topic echo /scan --field header.frame_id --once"
+        ok "/scan topic exists (some node declared it)" "confirm the stream manually: timeout 20 ros2 topic hz /scan; confirm frame_id: ros2 topic echo /scan --field header.frame_id --once"
       else
-        info "当前没有 /scan ⇒ 雷达驱动还没起来（或起来了但没声明该话题）"
+        info "no /scan right now => the lidar driver is not up yet (or is up but does not declare the topic)"
       fi
     fi
-    info "手动核对 /scan 与 TF（需要节点都在跑时执行）："
+    info "manually verify /scan and TF (run while the nodes are up):"
     info "  timeout 20 ros2 topic hz /scan"
-    info "  ros2 topic echo /scan --field header.frame_id --once    # 必须是 laser"
-    info "  ros2 run tf2_ros tf2_echo odom base_link                # 桥应发这个"
-    info "  ros2 run tf2_ros tf2_echo base_link laser              # 需要 URDF/static transform（本工程还没补，见报告）"
-    info "  ros2 run tf2_ros tf2_echo map odom                     # 建图时 slam_toolbox 发；定位时 AMCL 发，绝不同时"
+    info "  ros2 topic echo /scan --field header.frame_id --once    # must be laser"
+    info "  ros2 run tf2_ros tf2_echo odom base_link                # the bridge should publish this"
+    info "  ros2 run tf2_ros tf2_echo base_link laser              # needs URDF/static transform (not added in this project yet, see reports)"
+    info "  ros2 run tf2_ros tf2_echo map odom                     # published by slam_toolbox while mapping, by AMCL while localizing -- never both at once"
   fi
 
-  # ---------------------------------------------------------- 9 判定
-  sec "9. 判定与下一步（把这一整段抄回给 Lead）"
+  # ---------------------------------------------------------- 9 verdict
+  sec "9. Verdict and next step (paste this whole section back to the Lead)"
   local which
   which=""
   if [[ ${N7522:-0} -eq 0 && ${NCP210:-0} -eq 0 ]]; then
-    which="A 枚举不到"
+    which="A not enumerated"
   elif [[ $LIDAR_NODE_OK -eq 0 ]]; then
-    which="B 枚举到但没有 $LIDAR_NODE"
+    which="B enumerated but no $LIDAR_NODE"
   elif [[ -z $DRIVER_FOUND ]]; then
-    which="C 有设备节点但驱动包没装"
+    which="C node present but driver package not installed"
   elif [[ $PROBE_RUN -eq 1 && $PROBE_STTY_FAIL -eq 1 ]]; then
-    which="D2 探测条件不满足（stty 设不了设备，≠ 0 字节）"
+    which="D2 probe preconditions not met (stty cannot configure the device, != 0 bytes)"
   elif [[ $PROBE_RUN -eq 1 && $PROBE_BYTES -eq 0 ]]; then
-    which="D 驱动可能已装但串口没数据（探测 0 字节）"
+    which="D driver may be installed but no serial data (probe got 0 bytes)"
   else
-    which="E 设备/驱动/数据似乎齐全 → 下一步验 /scan 与 TF"
+    which="E device/driver/data look complete -> next verify /scan and TF"
   fi
-  printf '\n>>> 本次判定：%s\n' "$which"
-  printf '    （依据：7522=%d 7523=%d CP210x=%d，ttyLIDAR=%s，驱动=[%s]，探测=%s）\n' \
+  printf '\n>>> Verdict: %s\n' "$which"
+  printf '    (basis: 7522=%d 7523=%d CP210x=%d, ttyLIDAR=%s, driver=[%s], probe=%s)\n' \
     "${N7522:-0}" "${N7523:-0}" "${NCP210:-0}" \
-    "$([[ $LIDAR_NODE_OK -eq 1 ]] && printf '存在' || printf '不存在')" \
-    "${DRIVER_FOUND:-无}" \
-    "$([[ $PROBE_RUN -eq 1 ]] && printf '%d 字节' "$PROBE_BYTES" || printf '未探测')"
+    "$([[ $LIDAR_NODE_OK -eq 1 ]] && printf 'present' || printf 'absent')" \
+    "${DRIVER_FOUND:-none}" \
+    "$([[ $PROBE_RUN -eq 1 ]] && printf '%d bytes' "$PROBE_BYTES" || printf 'not probed')"
   if [[ $PROBE_STTY_FAIL -eq 1 ]]; then
-    printf '    （探测未执行：stty 设不了设备 —— 与「0 字节」分开报告，见失败树 D2）\n'
+    printf '    (probe not executed: stty cannot configure the device -- reported separately from \"0 bytes\", see failure tree D2)\n'
   fi
 
-  printf '\n失败树速查（现象 → 查什么 → 下一步最小实验）：\n'
-  printf '  A 枚举不到      → lsusb/dmesg 无 1a86:7522 → 换线换口、查供电；笔记本 Get-PnpDevice 只证明枚举\n'
-  printf '  B 有枚举无节点  → udev 规则没装 / ID_PATH 变了 → 装规则 reload+trigger；或 identify_ports.sh 重取 ID_PATH 报 Lead\n'
-  printf '  C 节点在无驱动  → ros2 pkg list 无雷达包 → 拍照定型号 → 离线装包（Pi 无外网，属阻塞）\n'
-  printf '  D 有驱动无数据  → --probe 全 0 字节 → 换波特率/查线序/--request-rplidar；查转接板芯片\n'
-  printf '  D2 探测条件不满足 → stty 设不了设备（打不开/不是 tty/无权限）→ 先 ls -l 与权限，不是 0 字节\n'
-  printf '  E 有数据无 /scan → launch 报错 → 串口名是否 %s、波特率、product_name；ros2 node list / topic list\n' "$LIDAR_NODE"
-  printf '  F 有 /scan 无 TF → frame_id 是否 laser → 本工程还没有 base_link→laser 的 URDF/static transform（已知缺口，见 reports/B_ros2.md §5.2 C1 / §6.3，M4 前补）\n'
+  printf '\nFailure tree quick reference (symptom -> what to check -> minimal next experiment):\n'
+  printf '  A not enumerated      -> lsusb/dmesg shows no 1a86:7522 -> swap cable and port, check power; the laptop Get-PnpDevice only proves enumeration\n'
+  printf '  B enumerated, no node -> udev rules not installed / ID_PATH changed -> install rules and reload+trigger; or re-read ID_PATH with identify_ports.sh and report to the Lead\n'
+  printf '  C node present, no driver -> ros2 pkg list has no lidar package -> photograph the model -> install offline (Pi has no internet; this is a blocker)\n'
+  printf '  D driver present, no data -> --probe shows 0 bytes everywhere -> try other baud rates / check wire order / --request-rplidar; inspect the adapter board chip\n'
+  printf '  D2 probe preconditions not met -> stty cannot configure the device (cannot open / not a tty / no permission) -> check ls -l and permissions first; this is not 0 bytes\n'
+  printf '  E data present, no /scan -> launch fails -> is the serial port %s, the baud rate, product_name; ros2 node list / topic list\n' "$LIDAR_NODE"
+  printf '  F /scan present, no TF -> is frame_id laser -> this project still has no base_link->laser URDF/static transform (known gap, see reports/B_ros2.md §5.2 C1 / §6.3, to be added before M4)\n'
 
-  printf '\n证据保存（把日志文件 + 照片一起回传）：\n'
+  printf '\nSaving evidence (send back the log file plus photos):\n'
   printf '  bash %s %s 2>&1 | tee ~/check_lidar_$(date +%%F_%%H%%M).log\n' \
     "${0##*/}" "$([[ $DO_PROBE -eq 1 ]] && printf -- '--probe' || printf '')"
-  printf '  然后：cat ~/check_lidar_*.log  （或直接把文件拷走）\n'
+  printf '  then: cat ~/check_lidar_*.log  (or just copy the file away)\n'
 
   printf '\n================================================================\n'
-  printf ' 汇总：PASS=%d  FAIL=%d  WARN=%d\n' "$PASS" "$FAIL" "$WARN"
-  printf ' 本脚本没有安装任何包、没有改 /etc、没有写文件；--probe 只改设备运行时波特率。\n'
+  printf ' Summary: PASS=%d  FAIL=%d  WARN=%d\n' "$PASS" "$FAIL" "$WARN"
+  printf ' This script installed no packages, changed no /etc, wrote no files; --probe only changes the device runtime baud rate.\n'
   printf '================================================================\n'
   if [[ $FAIL -gt 0 ]]; then return 1; fi
   return 0
