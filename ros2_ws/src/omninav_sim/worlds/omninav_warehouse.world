@@ -1,0 +1,128 @@
+<?xml version="1.0" ?>
+<!--
+  OmniNav 仿真世界：8 m x 6 m 仓储场地（围墙 + 两处货架/立柱 + 两个散货箱）
+  用途：验证 /cmd_vel -> /odom/TF 闭环，以及后续 Nav2 建图/定位/避障。
+-->
+<sdf version="1.6">
+  <world name="omninav_warehouse">
+
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+    <include>
+      <uri>model://sun</uri>
+    </include>
+
+    <physics type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_update_rate>1000</real_time_update_rate>
+    </physics>
+
+    <!-- ========== 围墙：x 方向长 8 m，y 方向宽 6 m，高 1.2 m ========== -->
+    <model name="wall_north">
+      <static>true</static>
+      <pose>0 3.0 0.6 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box size="8.0 0.10 1.2"/></geometry></collision>
+        <visual name="visual">
+          <geometry><box size="8.0 0.10 1.2"/></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_south">
+      <static>true</static>
+      <pose>0 -3.0 0.6 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box size="8.0 0.10 1.2"/></geometry></collision>
+        <visual name="visual">
+          <geometry><box size="8.0 0.10 1.2"/></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_east">
+      <static>true</static>
+      <pose>4.0 0 0.6 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box size="0.10 6.0 1.2"/></geometry></collision>
+        <visual name="visual">
+          <geometry><box size="0.10 6.0 1.2"/></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="wall_west">
+      <static>true</static>
+      <pose>-4.0 0 0.6 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box size="0.10 6.0 1.2"/></geometry></collision>
+        <visual name="visual">
+          <geometry><box size="0.10 6.0 1.2"/></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ========== 货架：两面墙边的长条台面，模拟仓储货位 ========== -->
+    <model name="shelf_a">
+      <static>true</static>
+      <pose>-1.5 2.45 0.45 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box size="2.0 0.50 0.90"/></geometry></collision>
+        <visual name="visual">
+          <geometry><box size="2.0 0.50 0.90"/></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/WoodPallet</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="shelf_b">
+      <static>true</static>
+      <pose>2.6 -2.45 0.45 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box size="2.0 0.50 0.90"/></geometry></collision>
+        <visual name="visual">
+          <geometry><box size="2.0 0.50 0.90"/></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/WoodPallet</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ========== 散货箱（导航绕障用） ========== -->
+    <model name="box_1">
+      <static>true</static>
+      <pose>1.2 1.0 0.20 0 0 0.3</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box size="0.40 0.40 0.40"/></geometry></collision>
+        <visual name="visual">
+          <geometry><box size="0.40 0.40 0.40"/></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="box_2">
+      <static>true</static>
+      <pose>-2.2 -1.1 0.15 0 0 0.0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box size="0.30 0.30 0.30"/></geometry></collision>
+        <visual name="visual">
+          <geometry><box size="0.30 0.30 0.30"/></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 仿真时间 / 物理参数 -->
+    <gui>
+      <camera name="user_camera">
+        <pose>-3.5 -3.5 2.6 0 0.35 0.75</pose>
+      </camera>
+    </gui>
+
+  </world>
+</sdf>
