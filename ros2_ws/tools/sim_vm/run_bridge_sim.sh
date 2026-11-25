@@ -28,6 +28,15 @@ source /opt/ros/humble/setup.bash
 # shellcheck disable=SC1091
 source "$WS/install/setup.bash"
 
+# If setup_bridge_env.sh had to vendor pyserial (apt mirror blocked), make it
+# importable for the bridge node started below.
+PY_VENDOR="$WS/lib/pyserial_vendor"
+if [ -d "$PY_VENDOR" ]; then
+  export PYTHONPATH="$PY_VENDOR${PYTHONPATH:+:$PYTHONPATH}"
+  echo "-- pyserial: $PY_VENDOR"
+fi
+python3 -c 'import serial; print("-- pyserial", serial.__version__, "from", serial.__file__)'
+
 echo "-- start fake STM32 (log: $LOG)"
 rm -f "$LOG"
 python3 -u "$FAKE" --pty --hz 50 >"$LOG" 2>&1 &

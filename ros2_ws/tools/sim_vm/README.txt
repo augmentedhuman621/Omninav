@@ -18,7 +18,9 @@ Files
 stm32_bridge/         ROS2 package source (rclpy node + protocol + kinematics)
 fake_stm32.py         STM32 stand-in, creates a pty and speaks the serial protocol
 libomninav_core.so    x86-64 build of firmware_core (the ONLY source of the mecanum math)
-setup_bridge_env.sh   copies the three items above into ~/omninav_ws and colcon-builds the package
+pyserial_vendor/      pyserial 3.5 (BSD-3-Clause, pure Python), used only if the VM
+                      has no pyserial and its apt mirror refuses the package
+setup_bridge_env.sh   copies the items above into ~/omninav_ws and colcon-builds the package
 run_bridge_sim.sh     starts fake_stm32.py on a pty, then starts stm32_bridge on that pty
 README.txt            this file
 
@@ -67,6 +69,11 @@ Steps
 
 Troubleshooting
 ---------------
+* apt says "403 Forbidden" for python3-serial, or "pyserial still missing" ->
+    This VM's apt mirror is blocked. The kit already carries pyserial 3.5 in
+    pyserial_vendor/, and setup_bridge_env.sh installs it into
+    ~/omninav_ws/lib/pyserial_vendor with no network; run_bridge_sim.sh puts
+    that directory on PYTHONPATH. Just re-run setup_bridge_env.sh.
 * "ModuleNotFoundError: No module named 'stm32_bridge'" ->
     fake_stm32.py must sit in ~/omninav_ws/tools/ and the package in
     ~/omninav_ws/src/stm32_bridge/. Re-run setup_bridge_env.sh.

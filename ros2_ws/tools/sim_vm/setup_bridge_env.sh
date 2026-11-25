@@ -38,8 +38,18 @@ cp -f "$KIT_DIR/libomninav_core.so" "$WS/lib/libomninav_core.so"
 file "$WS/lib/libomninav_core.so" | sed 's/^/   /'
 
 echo "-- check pyserial (bridge imports 'serial')"
+VENDOR_DIR="$WS/lib/pyserial_vendor"
 if python3 -c 'import serial' >/dev/null 2>&1; then
-  echo "   pyserial already present"
+  echo "   pyserial already present ($(python3 -c 'import serial; print(serial.__version__)'))"
+elif [ -d "$KIT_DIR/pyserial_vendor/serial" ]; then
+  # Offline fallback: this VM's apt mirror can return 403, so the kit ships a
+  # copy of pyserial 3.5 (BSD-3-Clause, pure Python) in pyserial_vendor/.
+  echo "   using the pyserial copy vendored in the kit (no network needed)"
+  mkdir -p "$VENDOR_DIR"
+  rm -rf "$VENDOR_DIR/serial"
+  cp -r "$KIT_DIR/pyserial_vendor/serial" "$VENDOR_DIR/serial"
+  PYTHONPATH="$VENDOR_DIR" python3 -c 'import serial; print("   vendored pyserial", serial.__version__)'
+  echo "   (run_bridge_sim.sh puts $VENDOR_DIR on PYTHONPATH)"
 elif command -v pip3 >/dev/null 2>&1 && pip3 install --user pyserial >/dev/null 2>&1; then
   echo "   installed pyserial with 'pip3 install --user'"
 else
