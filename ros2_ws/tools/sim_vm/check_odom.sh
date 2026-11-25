@@ -31,8 +31,12 @@ set -u
 
 echo
 echo "== rclpy graph probe =="
-python3 "$KIT_DIR/check_odom.py"
-rc=$?
+# 'set -e' would abort before the hints below, so capture the status explicitly.
+if python3 "$KIT_DIR/check_odom.py"; then
+  rc=0
+else
+  rc=$?
+fi
 if [ "$rc" -ne 0 ]; then
   echo
   echo "!! no /odom received. Check, in this order:"
