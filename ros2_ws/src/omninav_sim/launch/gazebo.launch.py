@@ -9,6 +9,11 @@ After launch:
   /cmd_vel  -> the planar_move plugin moves the robot body directly (omnidirectional)
   /odom     -> published by the plugin (the odom frame -> base_link TF is published by the plugin)
   /scan     -> roof-mounted 2D lidar (360 rays, 10 Hz, 0.12-8 m)
+
+Odom ownership switch (bridge mode):
+  ros2 launch omninav_sim gazebo.launch.py gui:=false gazebo_odom:=false
+  With gazebo_odom:=false the plug-in only moves the body and no longer publishes /odom or the
+  odom->base_link TF, so that stm32_bridge (with fake_stm32.py on a pty) is the single owner.
 """
 
 import os
@@ -32,10 +37,13 @@ def generate_launch_description():
     gui = LaunchConfiguration('gui')
     world = LaunchConfiguration('world')
     spawn_z = LaunchConfiguration('spawn_z')
+    gazebo_odom = LaunchConfiguration('gazebo_odom')
 
     xacro_file = PathJoinSubstitution([pkg_share, 'urdf', 'omninav_sim.urdf.xacro'])
     robot_description = ParameterValue(
-        Command(['xacro ', xacro_file]), value_type=str)
+        Command(['xacro ', xacro_file,
+                 ' publish_odom:=', gazebo_odom,
+                 ' publish_odom_tf:=', gazebo_odom]), value_type=str)
 
     gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -84,6 +92,10 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'spawn_z', default_value='0.075',
             description='Initial height of base_link (wheel radius 0.04 + chassis clearance 0.035)'),
+        DeclareLaunchArgument(
+            'gazebo_odom', default_value='true',
+            description='Let planar_move publish /odom + odom->base_link TF; set false when '
+                        'stm32_bridge owns them (bridge simulation mode)'),
         gzserver,
         gzclient,
         robot_state_publisher,

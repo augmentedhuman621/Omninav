@@ -16,6 +16,11 @@
 -->
 <robot name="omninav_sim" xmlns:xacro="http://www.ros.org/wiki/xacro">
 
+  <!-- Odom ownership switch. Default "true" = let the Gazebo planar_move plugin publish /odom + TF odom->base_link
+       (quick smoke test). Set both to "false" when stm32_bridge owns /odom + TF, otherwise two publishers fight. -->
+  <xacro:arg name="publish_odom" default="true"/>
+  <xacro:arg name="publish_odom_tf" default="true"/>
+
   <!-- ==================== Tunable parameters (TODO: replace with real measurements) ==================== -->
   <xacro:property name="wheelbase" value="0.200"/>
   <xacro:property name="track"     value="0.210"/>
@@ -169,8 +174,8 @@
       <robot_base_frame>base_link</robot_base_frame>
       <update_rate>50.0</update_rate>
       <publish_rate>50.0</publish_rate>
-      <publish_odom>true</publish_odom>
-      <publish_odom_tf>true</publish_odom_tf>
+      <publish_odom>$(arg publish_odom)</publish_odom>
+      <publish_odom_tf>$(arg publish_odom_tf)</publish_odom_tf>
     </plugin>
   </gazebo>
 
