@@ -8,6 +8,10 @@
 #
 # Then in this terminal:  bash run_bridge_sim.sh
 # Check in another terminal:  ros2 topic hz /odom   -> ~49-50 Hz, published by stm32_bridge
+#
+# It starts three processes: fake_stm32.py (pty), wheel_joint_states (display-only /joint_states
+# so RViz2 shows the wheels turning) and stm32_bridge in the foreground. Ctrl+C stops them all.
+# Set WHEEL_SPIN=0 to skip the wheel animation.
 set -euo pipefail
 
 KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -47,7 +51,14 @@ echo "-- start fake STM32 (log: $LOG)"
 rm -f "$LOG"
 python3 -u "$FAKE" --pty --hz 50 >"$LOG" 2>&1 &
 FAKE_PID=$!
+
+SPIN_LOG="${TMPDIR:-/tmp}/omninav_wheel_spin.log"
+SPIN_PID=""
 cleanup() {
+  if [ -n "$SPIN_PID" ]; then
+    kill "$SPIN_PID" 2>/dev/null || true
+    wait "$SPIN_PID" 2>/dev/null || true
+  fi
   kill "$FAKE_PID" 2>/dev/null || true
   wait "$FAKE_PID" 2>/dev/null || true
 }
@@ -71,6 +82,22 @@ if [ -z "$PTY" ]; then
 fi
 
 echo "-- pty slave: $PTY"
+
+# Display-only wheel animation: the planar_move plug-in moves the whole body, so the
+# wheels would stay frozen in RViz2. This node integrates /cmd_vel into /joint_states.
+if [ "${WHEEL_SPIN:-1}" = "0" ]; then
+  echo "-- wheel animation disabled (WHEEL_SPIN=0)"
+else
+  echo "-- start wheel_joint_states (RViz wheel animation, log: $SPIN_LOG; WHEEL_SPIN=0 disables)"
+  rm -f "$SPIN_LOG"
+  ros2 run stm32_bridge wheel_joint_states --ros-args \
+    -p use_sim_time:=true \
+    -p cmd_vel_topic:=cmd_vel \
+    -p joint_states_topic:=joint_states \
+    -p cmd_vel_timeout:=0.3 >"$SPIN_LOG" 2>&1 &
+  SPIN_PID=$!
+fi
+
 echo "-- start stm32_bridge (owner of /odom + TF odom->base_link); Ctrl+C stops both"
 ros2 run stm32_bridge stm32_bridge --ros-args \
   -p serial_port:="$PTY" \

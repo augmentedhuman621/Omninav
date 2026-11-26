@@ -222,7 +222,10 @@
                     mat="mat_black" rgba="0.10 0.10 0.12 1.0"/>
   </link>
 
-  <!-- ==================== Mecanum wheels (4, fixed joints; planar_move does not need the wheels to spin) ==================== -->
+  <!-- ==================== Mecanum wheels (4 continuous joints about +y) ====================
+       The joints are ``continuous`` so that a display node can feed /joint_states and make the
+       wheels turn in RViz2 (the planar_move plug-in only moves the body). With the default
+       damping the free wheels also roll quietly in Gazebo instead of jittering. -->
   <xacro:macro name="wheel" params="name x y side">
     <link name="wheel_${name}">
       <xacro:inertial_cyl m="${m_wheel}" r="${wheel_r}" l="${wheel_w}"/>
@@ -233,10 +236,12 @@
         <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
       </collision>
     </link>
-    <joint name="wheel_${name}_joint" type="fixed">
+    <joint name="wheel_${name}_joint" type="continuous">
       <parent link="base_link"/>
       <child link="wheel_${name}"/>
       <origin xyz="${x} ${y} ${axle_z}" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <dynamics damping="0.2" friction="0.0"/>
     </joint>
   </xacro:macro>
 

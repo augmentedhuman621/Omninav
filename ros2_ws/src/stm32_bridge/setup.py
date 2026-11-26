@@ -28,6 +28,7 @@ setup(
     entry_points={
         "console_scripts": [
             "stm32_bridge = stm32_bridge.bridge_node:main",
+            "wheel_joint_states = stm32_bridge.wheel_joint_states:main",
         ],
     },
 )
