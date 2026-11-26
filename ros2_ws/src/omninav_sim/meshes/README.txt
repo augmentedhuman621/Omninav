@@ -3,20 +3,22 @@ OmniNav simulation meshes (CAD-derived, decimated)
 
 Source: the SolidWorks CAD set of the robot (DI31013 battery-box / 4WD mecanum chassis
 project) exported to binary STL and decimated with a pure-numpy vertex-clustering
-script (grid 2.0 mm, wheels 1.0 mm), then recentred so that each mesh is centred on its
+script (grid 2.0 mm, wheels 0.8 mm), then recentred so that each mesh is centred on its
 bounding-box centre. Every file is in millimetres and is used with
 <mesh ... scale="0.001 0.001 0.001"/>.
 
-The wheels are deliberately kept below 21,845 triangles (= 65,536 vertices): Ogre, the
+The wheels are deliberately kept far below 21,845 triangles (= 65,536 vertices): Ogre, the
 renderer behind Gazebo classic, silently fails to draw meshes whose vertex count exceeds
 the 16-bit index limit on GPUs without 32-bit index buffer support (e.g. a VirtualBox VM
-with 3D acceleration disabled). The first cut at 24,915 triangles hit exactly that limit
-and the wheels were invisible in gzclient while RViz2 showed them fine.
+with 3D acceleration disabled). Two earlier cuts were still invisible in gzclient at
+24,915 and 17,114 triangles, so the wheels are now decimated to about 7.8k triangles,
+well inside the limit; the visible silhouette (rollers, hub bore, 80.3 mm diameter,
+41 mm width) is unchanged.
 
 Files (triangles, size):
   base_plate.stl        5,244 tris  256 KB   top chassis deck 230 x 304.88 x 3 mm
-  wheel_left.stl       17,114 tris  836 KB   left mecanum wheel, 41 x 80.3 x 80.6 mm
-  wheel_right.stl      16,692 tris  815 KB   right mecanum wheel (mirrored hub)
+  wheel_left.stl        7,848 tris  383 KB   left mecanum wheel, 41 x 80.3 x 80.6 mm
+  wheel_right.stl       7,727 tris  377 KB   right mecanum wheel (mirrored hub)
   motor.stl             1,900 tris   93 KB   JGB37 encoder gear motor 37 x 36.9 x 74.5 mm
   coupling.stl            826 tris   40 KB   6 mm to 8 mm shaft coupling 12 x 12 x 26 mm
   battery_box.stl       2,712 tris  133 KB   sheet-metal battery tray 68.6 x 120.4 x 36.2 mm

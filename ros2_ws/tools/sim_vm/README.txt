@@ -13,18 +13,18 @@ production path used on the robot:
 Gazebo only renders the world and moves the robot body; the bridge owns /odom
 and the odom->base_link TF, so exactly one publisher is active.
 
-The wheel joints in the URDF are ``continuous``, but the planar_move plug-in moves
-the whole body kinematically, so nothing would turn them. run_bridge_sim.sh also
-starts ``stm32_bridge/wheel_joint_states``: it integrates /cmd_vel into
-/joint_states (using the same C mecanum_inverse() as the bridge), so RViz2 shows
-the four wheels spinning. It is display-only: no /odom, no serial traffic.
-Set WHEEL_SPIN=0 to skip it, or run it by hand:
-  ros2 run stm32_bridge wheel_joint_states --ros-args -p use_sim_time:=true
+The wheel joints in the URDF are ``fixed``: the planar_move plug-in moves the whole
+body kinematically, so nothing has to turn them for the simulation to drive, and the
+robot stays one rigid body after URDF -> SDF joint reduction (the most robust case
+for Gazebo Classic). Gazebo (gzclient) is therefore the primary visualisation and
+simulation view; RViz2 can still be added with rviz:=true but then draws frozen
+wheels while the body moves.
 
 Files
 -----
 stm32_bridge/         ROS2 package source (rclpy nodes + protocol + kinematics);
-                      also holds wheel_joint_states, the display-only wheel animation
+                      also holds wheel_joint_states (display-only wheel animation,
+                      kept for a future re-enable, not started by this kit)
 fake_stm32.py         STM32 stand-in, creates a pty and speaks the serial protocol
 libomninav_core.so    x86-64 build of firmware_core (the ONLY source of the mecanum math)
 pyserial_vendor/      pyserial 3.5 (BSD-3-Clause, pure Python), used only if the VM
@@ -33,6 +33,8 @@ setup_bridge_env.sh   copies the items above into ~/omninav_ws and colcon-builds
 run_bridge_sim.sh     starts fake_stm32.py on a pty, then starts stm32_bridge on that pty
 check_odom.sh         graph probe (environment + nodes + topics + /odom count)
 check_odom.py         the rclpy part of check_odom.sh (also usable on its own)
+check_model.sh        deployment probe: mesh bytes/md5, URDF marker counts, installed
+                      share vs source copy, and the spawned model's link poses in Gazebo
 README.txt            this file
 
 Steps
@@ -63,10 +65,12 @@ Steps
      bash /media/sf_vmshare/omninav_bridge_sim/run_bridge_sim.sh
 
    It prints "PTY_SLAVE=/dev/pts/N" first (from fake_stm32.py), then starts the
-   wheel animation node and finally the bridge on that pty. Ctrl+C stops all of
-   them. In RViz2 the robot now drives forward/backward/sideways and the wheels
-   turn accordingly; they stop 0.3 s after /cmd_vel stops (same watchdog as the
-   bridge).
+   bridge on that pty. Ctrl+C stops both. In Gazebo the robot now drives
+   forward/backward/sideways from /cmd_vel (the body is moved by the plug-in, the
+   odom chain runs through the bridge).
+
+   To confirm that the workspace really holds the current model, run:
+     bash /media/sf_vmshare/omninav_bridge_sim/check_model.sh
 
 4. Verify (new terminal C):
 
@@ -94,13 +98,16 @@ Troubleshooting
 * "CoreLibraryNotFound" -> export OMNINAV_CORE_SO=~/omninav_ws/lib/libomninav_core.so
     (run_bridge_sim.sh already exports it for both processes it starts).
 * "No module named 'serial'" -> sudo apt-get install -y python3-serial
-* RViz2 shows the robot but the wheels are missing or frozen ->
-    The wheels only get a TF once /joint_states arrives. In bridge mode
-    run_bridge_sim.sh starts wheel_joint_states for you; check its log
-    (/tmp/omninav_wheel_spin.log) and that the terminal B process is still alive.
-    Without the bridge simulation, start it by hand:
-      ros2 run stm32_bridge wheel_joint_states --ros-args -p use_sim_time:=true
-    or add wheel_anim:=true to the ros2 launch command.
+* The robot body shows up in gzclient but a wheel (or another mesh part) is
+  missing, or the model looks like an older revision ->
+     Run check_model.sh first: it prints the installed mesh sizes/md5 and compares
+     the installed share copy with ~/omninav_ws/src/omninav_sim. If they differ,
+     the launch is still using a stale install: re-run setup_bridge_env.sh.
+     Mesh visuals that never render in Gazebo Classic are otherwise a renderer
+     limit (Ogre draws with 16-bit index buffers when the GL driver does not
+     advertise 32-bit ones, so a single mesh above ~65k vertices can silently
+     disappear; this VM renders in software). The wheel meshes are decimated to
+     ~7.8k triangles for that reason.
 * /odom published twice / TF warnings about multiple publishers ->
     Gazebo was started without gazebo_odom:=false. Restart it with that flag.
 * "ros2 topic hz /odom" prints "topic [/odom] does not appear to be published

@@ -27,8 +27,8 @@
   CAD parts used as visual meshes (measured bounding boxes, mm)
   ============================================================
     base_plate.stl        230.00 x   3.00 x 304.88  main chassis plate (230 wide / 304.88 long)
-    wheel_left.stl         41.00 x  80.32 x  80.62  left mecanum wheel, 24,915 tris (was 197,182)
-    wheel_right.stl        41.00 x  80.32 x  80.62  right mecanum wheel, 24,138 tris (was 190,544)
+    wheel_left.stl         41.00 x  80.28 x  80.55  left mecanum wheel, 7,848 tris (was 197,182)
+    wheel_right.stl        41.00 x  80.28 x  80.59  right mecanum wheel, 7,727 tris (was 190,544)
     motor.stl              37.00 x  36.91 x  74.50  encoder motor (body only)
     coupling.stl           12.00 x  12.00 x  26.00  wheel coupling
     side_panel_left.stl    51.25 x  40.00 x 182.00  side panel hanging from the deck edge, left
@@ -222,10 +222,14 @@
                     mat="mat_black" rgba="0.10 0.10 0.12 1.0"/>
   </link>
 
-  <!-- ==================== Mecanum wheels (4 continuous joints about +y) ====================
-       The joints are ``continuous`` so that a display node can feed /joint_states and make the
-       wheels turn in RViz2 (the planar_move plug-in only moves the body). With the default
-       damping the free wheels also roll quietly in Gazebo instead of jittering. -->
+  <!-- ==================== Mecanum wheels (4 fixed joints) ====================
+       The wheels hang below the deck on FIXED joints. The gazebo_ros_planar_move plug-in drives
+       the body kinematically (it sets the model twist), so no wheel ever needs to rotate for the
+       simulation to move, and there is no wheel-ground contact to resolve. Keeping the wheels
+       fixed also keeps the robot a single rigid body after URDF -> SDF joint reduction, which is
+       the most robust configuration for Gazebo Classic; a movable wheel joint buys nothing here
+       and only adds a way for the visual to get dropped. To animate the wheels in RViz2 instead,
+       change type to "continuous" and add <axis xyz="0 1 0"/> plus a <limit>. -->
   <xacro:macro name="wheel" params="name x y side">
     <link name="wheel_${name}">
       <xacro:inertial_cyl m="${m_wheel}" r="${wheel_r}" l="${wheel_w}"/>
@@ -236,16 +240,10 @@
         <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
       </collision>
     </link>
-    <joint name="wheel_${name}_joint" type="continuous">
+    <joint name="wheel_${name}_joint" type="fixed">
       <parent link="base_link"/>
       <child link="wheel_${name}"/>
       <origin xyz="${x} ${y} ${axle_z}" rpy="0 0 0"/>
-      <axis xyz="0 1 0"/>
-      <!-- Continuous joints do not need limits, but some URDF -> SDF converters drop the
-           joint origin when the <limit> element is missing, which parked the wheels at the
-           model origin in Gazebo. Declare an explicit (effectively unlimited) limit. -->
-      <limit lower="-1e9" upper="1e9" effort="10.0" velocity="100.0"/>
-      <dynamics damping="0.2" friction="0.0"/>
     </joint>
   </xacro:macro>
 

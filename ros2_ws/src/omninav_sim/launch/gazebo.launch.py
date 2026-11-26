@@ -9,12 +9,8 @@ RViz2 visualisation (works headless; useful when the VM has no 3D acceleration):
   ros2 launch omninav_sim gazebo.launch.py gui:=false gazebo_odom:=false rviz:=true
   The bundled config shows the URDF model, TF tree, /scan and the /odom trail; start
   stm32_bridge afterwards so that odom -> base_link exists (Fixed Frame = odom).
-
-Spinning wheels in RViz2:
-  The wheel joints are ``continuous`` but the planar_move plug-in only moves the body, so
-  nothing turns them. Add wheel_anim:=true (or let run_bridge_sim.sh start the same node)
-  and stm32_bridge/wheel_joint_states will integrate /cmd_vel into /joint_states:
-  ros2 launch omninav_sim gazebo.launch.py gui:=false rviz:=true wheel_anim:=true
+  The wheel joints are fixed (see the URDF header), so RViz2 draws the wheels frozen while
+  the whole body moves; wheel spin is not simulated in this configuration.
 
 After launch:
   /cmd_vel  -> the planar_move plugin moves the robot body directly (omnidirectional)
@@ -99,18 +95,10 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('rviz')),
     )
 
-    # Display-only wheel animation: the planar_move plug-in moves the body kinematically, so the
-    # four continuous wheel joints never turn by themselves and RViz2 would draw frozen wheels.
-    # This node integrates /cmd_vel into /joint_states (see stm32_bridge/wheel_angles.py).
-    # Off by default: in bridge mode run_bridge_sim.sh starts it, so do not start it twice.
-    wheel_anim = Node(
-        package='stm32_bridge',
-        executable='wheel_joint_states',
-        name='wheel_joint_states',
-        output='screen',
-        parameters=[{'use_sim_time': use_sim_time}],
-        condition=IfCondition(LaunchConfiguration('wheel_anim')),
-    )
+    # Display-only wheel animation node (stm32_bridge/wheel_joint_states) is disabled together
+    # with the continuous wheel joints: the wheels are fixed now so the node would publish
+    # /joint_states for joint names that do not exist. The module and its unit test are kept in
+    # stm32_bridge for a future re-enable.
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -136,15 +124,9 @@ def generate_launch_description():
             'rviz', default_value='false',
             description='Start rviz2 with the bundled omninav_robot.rviz config (model, TF, '
                         '/scan, /odom trail)'),
-        DeclareLaunchArgument(
-            'wheel_anim', default_value='false',
-            description='Start the display-only wheel animation node (stm32_bridge/wheel_joint_states) '
-                        'so the wheels turn in RViz2. Leave false in bridge mode: '
-                        'run_bridge_sim.sh starts the same node'),
         gzserver,
         gzclient,
         robot_state_publisher,
         spawn_entity,
         rviz,
-        wheel_anim,
     ])
