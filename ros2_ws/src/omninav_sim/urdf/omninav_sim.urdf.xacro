@@ -9,8 +9,10 @@
     Gazebo/RViz stay responsive. Units stay millimetres inside the STL, the URDF applies scale=0.001.
   * collision: still box/cylinder on purpose. The drive plugin moves the model kinematically and mesh
     collision geometry only burns CPU here.
-  * fixed joints only: the wheels do not spin in the URDF. Odometry comes either from the Gazebo
-    planar_move plugin or from stm32_bridge (single owner, selected with the gazebo_odom argument).
+  * the wheel joints are passive continuous joints (see the wheel macro), so the four wheels roll
+    freely while the planar_move plugin drags the body; they are not torque-driven. Odometry comes
+    either from the Gazebo planar_move plugin or from stm32_bridge (single owner, selected with the
+    gazebo_odom argument).
 
   Layout follows the CAD battery-box assembly figures (drive E:, DI31013_Battery_Box_Final_Complete_V2_M3)
   and their dimensioned side view, which fixes the vertical stack:
@@ -59,6 +61,12 @@
        (quick smoke test). Set both to "false" when stm32_bridge owns /odom + TF, otherwise two publishers fight. -->
   <xacro:arg name="publish_odom" default="true"/>
   <xacro:arg name="publish_odom_tf" default="true"/>
+
+  <!-- Wheel joint type. "continuous" (default) lets the four wheel links spin freely, so the
+       planar_move drive drags them along and the wheels visibly roll in Gazebo / RViz2.
+       "fixed" merges the wheels into base_link on URDF -> SDF reduction; use it as a fallback
+       if a wheel ever fails to render again (pass wheel_joints:=fixed through the launch file). -->
+  <xacro:arg name="wheel_joints" default="continuous"/>
 
   <!-- ==================== Dimensions (CAD measured unless marked) ==================== -->
   <xacro:property name="wheel_r"        value="0.040376"/>  <!-- 80.75 mm diameter, CAD R = 40.376 -->
@@ -222,14 +230,13 @@
                     mat="mat_black" rgba="0.10 0.10 0.12 1.0"/>
   </link>
 
-  <!-- ==================== Mecanum wheels (4 fixed joints) ====================
-       The wheels hang below the deck on FIXED joints. The gazebo_ros_planar_move plug-in drives
-       the body kinematically (it sets the model twist), so no wheel ever needs to rotate for the
-       simulation to move, and there is no wheel-ground contact to resolve. Keeping the wheels
-       fixed also keeps the robot a single rigid body after URDF -> SDF joint reduction, which is
-       the most robust configuration for Gazebo Classic; a movable wheel joint buys nothing here
-       and only adds a way for the visual to get dropped. To animate the wheels in RViz2 instead,
-       change type to "continuous" and add <axis xyz="0 1 0"/> plus a <limit>. -->
+  <!-- ==================== Mecanum wheels ====================
+       The wheel links are passive: the gazebo_ros_planar_move plug-in sets the body twist
+       directly, so the wheels are only dragged over the ground. They are still free to rotate
+       (continuous joint about +y, almost no damping), which is what makes them visibly roll in
+       Gazebo and RViz2 while the body moves - no controller and no wheel torque are involved,
+       so the drive chain (motor -> coupling -> wheel) stays cosmetic here.
+       Set the wheel_joints arg to "fixed" to merge them into base_link instead. -->
   <xacro:macro name="wheel" params="name x y side">
     <link name="wheel_${name}">
       <xacro:inertial_cyl m="${m_wheel}" r="${wheel_r}" l="${wheel_w}"/>
@@ -240,10 +247,13 @@
         <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
       </collision>
     </link>
-    <joint name="wheel_${name}_joint" type="fixed">
+    <joint name="wheel_${name}_joint" type="$(arg wheel_joints)">
       <parent link="base_link"/>
       <child link="wheel_${name}"/>
       <origin xyz="${x} ${y} ${axle_z}" rpy="0 0 0"/>
+      <axis xyz="0 1 0"/>
+      <limit lower="-1e9" upper="1e9" effort="10.0" velocity="100.0"/>
+      <dynamics damping="0.01" friction="0.0"/>
     </joint>
   </xacro:macro>
 

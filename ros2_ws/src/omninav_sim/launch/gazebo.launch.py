@@ -9,8 +9,12 @@ RViz2 visualisation (works headless; useful when the VM has no 3D acceleration):
   ros2 launch omninav_sim gazebo.launch.py gui:=false gazebo_odom:=false rviz:=true
   The bundled config shows the URDF model, TF tree, /scan and the /odom trail; start
   stm32_bridge afterwards so that odom -> base_link exists (Fixed Frame = odom).
-  The wheel joints are fixed (see the URDF header), so RViz2 draws the wheels frozen while
-  the whole body moves; wheel spin is not simulated in this configuration.
+  The wheel joints are continuous, so the wheels roll while the body moves.
+
+Wheel joints:
+  wheel_joints:=continuous (default) keeps the wheels free so the planar_move drive drags
+  them and they visibly roll. wheel_joints:=fixed merges them into base_link instead - use it
+  only as a fallback if a wheel ever fails to render.
 
 After launch:
   /cmd_vel  -> the planar_move plugin moves the robot body directly (omnidirectional)
@@ -45,12 +49,14 @@ def generate_launch_description():
     world = LaunchConfiguration('world')
     spawn_z = LaunchConfiguration('spawn_z')
     gazebo_odom = LaunchConfiguration('gazebo_odom')
+    wheel_joints = LaunchConfiguration('wheel_joints')
 
     xacro_file = PathJoinSubstitution([pkg_share, 'urdf', 'omninav_sim.urdf.xacro'])
     robot_description = ParameterValue(
         Command(['xacro ', xacro_file,
                  ' publish_odom:=', gazebo_odom,
-                 ' publish_odom_tf:=', gazebo_odom]), value_type=str)
+                 ' publish_odom_tf:=', gazebo_odom,
+                 ' wheel_joints:=', wheel_joints]), value_type=str)
 
     gzserver = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -120,6 +126,11 @@ def generate_launch_description():
             'gazebo_odom', default_value='true',
             description='Let planar_move publish /odom + odom->base_link TF; set false when '
                         'stm32_bridge owns them (bridge simulation mode)'),
+        DeclareLaunchArgument(
+            'wheel_joints', default_value='continuous',
+            description='URDF wheel joint type: continuous lets the wheels roll passively while '
+                        'the plug-in drags the body (default); fixed merges them into base_link '
+                        'and is the fallback if a wheel ever fails to render'),
         DeclareLaunchArgument(
             'rviz', default_value='false',
             description='Start rviz2 with the bundled omninav_robot.rviz config (model, TF, '

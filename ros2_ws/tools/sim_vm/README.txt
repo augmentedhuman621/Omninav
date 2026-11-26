@@ -13,12 +13,12 @@ production path used on the robot:
 Gazebo only renders the world and moves the robot body; the bridge owns /odom
 and the odom->base_link TF, so exactly one publisher is active.
 
-The wheel joints in the URDF are ``fixed``: the planar_move plug-in moves the whole
-body kinematically, so nothing has to turn them for the simulation to drive, and the
-robot stays one rigid body after URDF -> SDF joint reduction (the most robust case
-for Gazebo Classic). Gazebo (gzclient) is therefore the primary visualisation and
-simulation view; RViz2 can still be added with rviz:=true but then draws frozen
-wheels while the body moves.
+The wheel joints in the URDF are ``continuous`` with almost no damping, so the four
+wheels are free to rotate and the planar_move plug-in drags them along: they visibly
+roll in Gazebo while the body drives. No controller and no wheel torque are involved
+(the drive is kinematic), so the motor -> coupling -> wheel chain stays cosmetic.
+If a wheel ever fails to render, pass wheel_joints:=fixed to the launch file as a
+fallback (that merges the wheels into base_link, and they stop rolling).
 
 Files
 -----
